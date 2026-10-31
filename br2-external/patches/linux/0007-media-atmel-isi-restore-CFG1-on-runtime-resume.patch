@@ -1,0 +1,53 @@
+From: magpie <noreply@example.invalid>
+Subject: [PATCH] media: atmel-isi: restore CFG1 on runtime resume
+
+The bus parameters (sync and pixel clock polarity, FIFO threshold) are
+written to CFG1 once, when the sensor is bound, and start_streaming()
+only read-modify-writes the register. A system sleep that cuts the core
+power (the sam9x5 backup sleep) resets the ISI, so after a resume CFG1
+was 0 and about half the JPEG frames came out misaligned. Keep the value
+and write it back whenever the ISI clock is enabled again.
+
+Signed-off-by: magpie <noreply@example.invalid>
+---
+--- a/drivers/media/platform/atmel/atmel-isi.c
++++ b/drivers/media/platform/atmel/atmel-isi.c
+@@ -105,6 +105,8 @@
+ 	spinlock_t			irqlock;
+ 	struct device			*dev;
+ 	void __iomem			*regs;
++	/* bus parameters written to CFG1 by isi_camera_set_bus_param() */
++	u32				cfg1;
+ 
+ 	int				sequence;
+ 
+@@ -855,6 +857,7 @@
+ 	if (ret < 0)
+ 		return ret;
+ 
++	isi->cfg1 = cfg1;
+ 	isi_writel(isi, ISI_CTRL, ISI_CTRL_DIS);
+ 	isi_writel(isi, ISI_CFG1, cfg1);
+ 
+@@ -1386,8 +1389,20 @@
+ static int atmel_isi_runtime_resume(struct device *dev)
+ {
+ 	struct atmel_isi *isi = dev_get_drvdata(dev);
++	int ret;
+ 
+-	return clk_prepare_enable(isi->pclk);
++	ret = clk_prepare_enable(isi->pclk);
++	if (ret)
++		return ret;
++	/*
++	 * A system sleep that cuts the core power (sam9x5 backup mode) resets
++	 * the ISI, and start_streaming() only modifies CFG1, so put the bus
++	 * parameters (sync/pixel clock polarity, FIFO threshold) back. Before
++	 * the first isi_camera_set_bus_param() this writes the reset value.
++	 */
++	isi_writel(isi, ISI_CFG1, isi->cfg1);
++
++	return 0;
+ }
+ #endif /* CONFIG_PM */
+ 

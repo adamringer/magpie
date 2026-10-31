@@ -63,6 +63,7 @@ struct opts {
 	int verbose;
 	int version_only;
 	int pins_only;
+	int warmup_ms;
 	const char *out;
 };
 
@@ -555,6 +556,43 @@ static void status_regs(void)
 	vlog("status registers: 0x38 = %s0x%08x, 0x3c = %s0x%08x", ra ? "(failed) " : "", a, rb ? "(failed) " : "", b);
 }
 
+/* -------------------------------------------------------------- RTT */
+
+/*
+ * The SAM9X5 Real-time Timer counts the 32.768 kHz slow clock in the backup power domain, so it keeps running
+ * through the fast-resume power cuts and cold boots, unlike the kernel's clock, which is re-read from the RTC
+ * (whole seconds) after every resume. Its count at each capture puts all captures on one continuous timebase.
+ */
+#define SYSC_PAGE 0xFFFFF000u
+#define RTT_MR_OFF 0xE20
+#define RTT_VR_OFF 0xE28
+static volatile uint32_t *g_sysc;
+
+static void rtt_map(void)
+{
+	int fd = open("/dev/mem", O_RDONLY | O_SYNC | O_CLOEXEC);
+	void *p;
+
+	if (fd < 0)
+		return;
+	p = mmap(NULL, 4096, PROT_READ, MAP_SHARED, fd, SYSC_PAGE);
+	close(fd);
+	if (p != MAP_FAILED)
+		g_sysc = p;
+}
+
+static uint32_t rtt_value(void)
+{
+	uint32_t a, b;
+
+	/* the counter is asynchronous to the CPU clock: read until two reads agree */
+	do {
+		a = g_sysc[RTT_VR_OFF / 4];
+		b = g_sysc[RTT_VR_OFF / 4];
+	} while (a != b);
+	return a;
+}
+
 /* -------------------------------------------------------------- capture */
 
 struct stats {
@@ -562,6 +600,10 @@ struct stats {
 	unsigned overruns;
 	int64_t first_rt_ns; /* CLOCK_REALTIME of page 0's DATA READY edge (page 0 complete) */
 	int first_from_edge; /* 1: from the kernel edge timestamp, 0: line was already low (read time) */
+	int have_rtt;        /* RTT counter read right after page 0 */
+	uint32_t rtt;        /* RTT_VR then */
+	uint32_t rtt_pres;   /* RTT_MR prescaler (SLCK cycles per count; 0 means 65536) */
+	int64_t rtt_after_edge_ns; /* time between the page-0 edge and the RTT read */
 	int64_t *t;       /* clock_gettime at each page start */
 	uint64_t *edge;   /* newest kernel edge timestamp seen before each page (0 = none) */
 };
@@ -595,6 +637,12 @@ static int capture(uint8_t *buf, unsigned pages, struct stats *st)
 			rt_ns = (int64_t)rt.tv_sec * 1000000000 + rt.tv_nsec;
 			st->first_from_edge = ts != 0;
 			st->first_rt_ns = ts ? rt_ns - (mono_ns - (int64_t)ts) : rt_ns;
+			if (g_sysc) {
+				st->rtt = rtt_value();
+				st->rtt_pres = g_sysc[RTT_MR_OFF / 4] & 0xFFFF;
+				st->rtt_after_edge_ns = ts ? now_ns() - (int64_t)ts : 0;
+				st->have_rtt = 1;
+			}
 		}
 		if (n > 1)
 			st->overruns += n - 1;
@@ -731,6 +779,9 @@ static void write_time_file(const char *path, const struct stats *st, unsigned p
 	}
 	fprintf(f, "first_page_utc=%s.%06ldZ\nsource=%s\npages=%u\n", when, usec,
 		st->first_from_edge ? "edge" : "level", pages);
+	if (st->have_rtt)
+		fprintf(f, "rtt=%u\nrtt_pres=%u\nrtt_after_edge_us=%lld\n", st->rtt, st->rtt_pres ? st->rtt_pres : 65536,
+			(long long)(st->rtt_after_edge_ns / 1000));
 	if (fflush(f) || fsync(fileno(f)) || fclose(f))
 		err("write %s: %s", tpath, strerror(errno));
 	vlog("first page (DATA READY edge) at %s.%06ldZ (%s)", when, usec, st->first_from_edge ? "edge" : "level");
@@ -776,6 +827,7 @@ static void rt_setup(void)
 {
 	struct sched_param sp = { .sched_priority = 10 };
 
+	rtt_map(); /* optional: no RTT count in the .time file if /dev/mem can't be mapped */
 	if (mlockall(MCL_CURRENT | MCL_FUTURE))
 		vlog("mlockall: %s", strerror(errno));
 	if (sched_setscheduler(0, SCHED_FIFO, &sp))
@@ -850,7 +902,16 @@ static int run(void)
 		rc = EXIT_OK;
 		goto out;
 	}
-	if (cg_config() || snap_prepare(pages, g.o.test)) {
+	if (cg_config()) {
+		rc = EXIT_DEVICE;
+		goto out;
+	}
+	if (g.o.warmup_ms > 0) {
+		/* chip and RF section configured and running; let them settle before the capture starts */
+		vlog("warm-up %d ms", g.o.warmup_ms);
+		usleep((useconds_t)g.o.warmup_ms * 1000);
+	}
+	if (snap_prepare(pages, g.o.test)) {
 		rc = EXIT_DEVICE;
 		goto out;
 	}
@@ -901,6 +962,7 @@ static void usage(FILE *f)
 		"gpsnap " GPSNAP_VERSION " - ACLYS GPS snapshot capture\nUsage: gpsnap [options]\n"
 		"  -s MS    snapshot length in ms, 16..4096 (default %d; pages = ms/16)\n"
 		"  -a 0|1   LNA GPIO value (default 0)\n"
+		"  -w MS    warm-up: wait MS ms after configuring the chip before the capture starts (default 0)\n"
 		"  -t       chip test pattern instead of GPS samples\n"
 		"  -e       verify the test pattern (implies -t); exit 5 on mismatch\n"
 		"  -o PATH  output file (default %s/YYYYMMDD-HHMMSS.snap)\n"
@@ -924,7 +986,7 @@ int main(int argc, char **argv)
 	int c, rc;
 
 	g.o.ms = GPS_MS_DEFAULT;
-	while ((c = getopt_long(argc, argv, "s:a:teo:vh", longopts, NULL)) != -1) {
+	while ((c = getopt_long(argc, argv, "s:a:w:teo:vh", longopts, NULL)) != -1) {
 		char *end;
 
 		switch (c) {
@@ -941,6 +1003,13 @@ int main(int argc, char **argv)
 				return EXIT_USAGE;
 			}
 			g.o.lna = optarg[0] - '0';
+			break;
+		case 'w':
+			g.o.warmup_ms = (int)strtol(optarg, &end, 10);
+			if (*end || !optarg[0] || g.o.warmup_ms < 0 || g.o.warmup_ms > 10000) {
+				fprintf(stderr, "gpsnap: -w needs 0..10000\n");
+				return EXIT_USAGE;
+			}
 			break;
 		case 't':
 			g.o.test = 1;

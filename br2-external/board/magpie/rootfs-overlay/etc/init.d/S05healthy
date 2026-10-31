@@ -1,0 +1,14 @@
+#!/bin/sh
+# If usb0 is up and telnetd runs: clear the boot counter (GPBR2), mark healthy (GPBR1). Runs early, right after USB + telnet.
+log() { echo "S05healthy: $*" > /dev/kmsg 2>/dev/null; }
+
+[ "$1" = start ] || exit 0
+log start
+if ifconfig usb0 2>/dev/null | grep -q UP && pidof telnetd > /dev/null; then
+	devmem 0xfffffe68 32 0
+	devmem 0xfffffe64 32 0x4D500020
+	log "healthy, boot counter cleared"
+else
+	log "NOT healthy, boot counter left alone"
+fi
+exit 0

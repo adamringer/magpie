@@ -1,0 +1,7 @@
+#!/bin/sh
+# Progress marker: init scripts started (GPBR1 = 0x4D500010). Logs first, so a hang shows up in ramoops.
+[ "$1" = start ] || exit 0
+echo "S01bootmark: start" > /dev/kmsg
+devmem 0xfffffe64 32 0x4D500010 2>/dev/null
+echo "S01bootmark: done" > /dev/kmsg
+exit 0

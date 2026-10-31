@@ -1,0 +1,175 @@
+media: ov5640, atmel-isi: JPEG pass-through
+
+Full-size (2592x1944) stills don't fit in RAM uncompressed, so use the
+sensor's JPEG encoder the way the stock firmware (mmt_vid.ko) did.
+
+ov5640: in JPEG mode use compression mode 4 with 1024-byte lines, each
+starting with a 2-byte big-endian payload length, at most 2048 lines,
+and the stock quantization scale (0x4407 = 5). Mainline's mode 3 sends
+lines as wide as the image, which would need a 5 MB buffer.
+
+atmel-isi: add V4L2_PIX_FMT_JPEG for MEDIA_BUS_FMT_JPEG_1X8. The codec
+path stores the bytes unchanged when set up for YCbCr 2 bytes/pixel,
+so program 512 x 2048 "pixels" (the stock ISI_CFG2 0x01FF07FF) into a
+2 MiB buffer, skip the 2048-pixel width clamp for JPEG, and report the
+bytes actually written (DMA end address) as the payload. Userspace
+strips the line headers and joins the payloads.
+
+--- a/drivers/media/i2c/ov5640.c
++++ b/drivers/media/i2c/ov5640.c
+@@ -105,6 +105,7 @@
+ #define OV5640_REG_VFIFO_HSIZE		0x4602
+ #define OV5640_REG_VFIFO_VSIZE		0x4604
+ #define OV5640_REG_JPG_MODE_SELECT	0x4713
++#define OV5640_REG_JPG_QS		0x4407
+ #define OV5640_REG_CCIR656_CTRL00	0x4730
+ #define OV5640_REG_POLARITY_CTRL00	0x4740
+ #define OV5640_REG_MIPI_CTRL00		0x4800
+@@ -119,6 +120,10 @@
+ #define OV5640_REG_SDE_CTRL5		0x5585
+ #define OV5640_REG_AVG_READOUT		0x56a1
+ 
++/* JPEG framing, see ov5640_set_jpeg_timings() */
++#define OV5640_MAGPIE_JPEG_LINE		1024
++#define OV5640_MAGPIE_JPEG_LINES		2048
++
+ enum ov5640_mode_id {
+ 	OV5640_MODE_QQVGA_160_120 = 0,
+ 	OV5640_MODE_QCIF_176_144,
+@@ -1627,21 +1632,29 @@
+ 	int ret;
+ 
+ 	/*
+-	 * compression mode 3 timing
+-	 *
+-	 * Data is transmitted with programmable width (VFIFO_HSIZE).
+-	 * No padding done. Last line may have less data. Varying
+-	 * number of lines per frame, depending on amount of data.
++	 * Use the stock firmware's framing (mmt_vid.ko), which
++	 * the Atmel ISI captures as plain bytes. Compression mode 4: each line
++	 * is OV5640_MAGPIE_JPEG_LINE bytes and starts with a 2-byte big-endian
++	 * count of the JPEG bytes that follow (0 = empty line); at most
++	 * OV5640_MAGPIE_JPEG_LINES lines per frame, so a frame fits a 2 MiB
++	 * buffer whatever the image size. Userspace joins the payloads.
+ 	 */
+-	ret = ov5640_mod_reg(sensor, OV5640_REG_JPG_MODE_SELECT, 0x7, 0x3);
++	ret = ov5640_mod_reg(sensor, OV5640_REG_JPG_MODE_SELECT, 0x7, 0x4);
++	if (ret < 0)
++		return ret;
++
++	ret = ov5640_write_reg16(sensor, OV5640_REG_VFIFO_HSIZE,
++				 OV5640_MAGPIE_JPEG_LINE);
+ 	if (ret < 0)
+ 		return ret;
+ 
+-	ret = ov5640_write_reg16(sensor, OV5640_REG_VFIFO_HSIZE, mode->width);
++	ret = ov5640_write_reg16(sensor, OV5640_REG_VFIFO_VSIZE,
++				 OV5640_MAGPIE_JPEG_LINES);
+ 	if (ret < 0)
+ 		return ret;
+ 
+-	return ov5640_write_reg16(sensor, OV5640_REG_VFIFO_VSIZE, mode->height);
++	/* quantization scale as stock (smaller = better quality) */
++	return ov5640_write_reg(sensor, OV5640_REG_JPG_QS, 0x05);
+ }
+ 
+ /* download ov5640 settings to sensor through i2c */
+--- a/drivers/media/platform/atmel/atmel-isi.c
++++ b/drivers/media/platform/atmel/atmel-isi.c
+@@ -36,6 +36,16 @@
+ 
+ #define MAX_SUPPORT_WIDTH		2048U
+ #define MAX_SUPPORT_HEIGHT		2048U
++
++/*
++ * JPEG pass-through: the OV5640 sends compressed data in
++ * fixed lines of ISI_JPEG_LINE bytes (each with a 2-byte length header), at
++ * most ISI_JPEG_LINES lines. The codec path stores the bytes unchanged when
++ * set up for YCbCr with 2 bytes per pixel, as the stock driver did.
++ */
++#define ISI_JPEG_LINE			1024U
++#define ISI_JPEG_LINES			2048U
++#define ISI_JPEG_SIZEIMAGE		(ISI_JPEG_LINE * ISI_JPEG_LINES)
+ #define MIN_FRAME_RATE			15
+ #define FRAME_INTERVAL_MILLI_SEC	(1000 / MIN_FRAME_RATE)
+ 
+@@ -154,6 +164,16 @@
+ 	cfg2 = isi->current_fmt->swap;
+ 
+ 	isi_writel(isi, ISI_CTRL, ISI_CTRL_DIS);
++	if (fourcc == V4L2_PIX_FMT_JPEG) {
++		/* The sensor's line framing, not the image size */
++		cfg2 |= ((ISI_JPEG_LINE / 2 - 1) << ISI_CFG2_IM_HSIZE_OFFSET) &
++				ISI_CFG2_IM_HSIZE_MASK;
++		cfg2 |= ((ISI_JPEG_LINES - 1) << ISI_CFG2_IM_VSIZE_OFFSET) &
++				ISI_CFG2_IM_VSIZE_MASK;
++		isi_writel(isi, ISI_CFG2, cfg2);
++		return;
++	}
++
+ 	/* Set width */
+ 	cfg2 |= ((isi->fmt.fmt.pix.width - 1) << ISI_CFG2_IM_HSIZE_OFFSET) &
+ 			ISI_CFG2_IM_HSIZE_MASK;
+@@ -178,6 +198,16 @@
+ 		struct frame_buffer *buf = isi->active;
+ 
+ 		list_del_init(&buf->list);
++		if (isi->current_fmt->fourcc == V4L2_PIX_FMT_JPEG) {
++			/* bytes written = DMA end address - buffer start */
++			dma_addr_t start =
++				vb2_dma_contig_plane_dma_addr(&vbuf->vb2_buf, 0);
++			u32 end = isi_readl(isi, ISI_DMA_C_ADDR);
++
++			if (end > start && end - start <= ISI_JPEG_SIZEIMAGE)
++				vb2_set_plane_payload(&vbuf->vb2_buf, 0,
++						      end - start);
++		}
+ 		vbuf->vb2_buf.timestamp = ktime_get_ns();
+ 		vbuf->sequence = isi->sequence++;
+ 		vbuf->field = V4L2_FIELD_NONE;
+@@ -601,9 +631,14 @@
+ 		pixfmt->pixelformat = isi_fmt->fourcc;
+ 	}
+ 
+-	/* Limit to Atmel ISI hardware capabilities */
+-	pixfmt->width = clamp(pixfmt->width, 0U, MAX_SUPPORT_WIDTH);
+-	pixfmt->height = clamp(pixfmt->height, 0U, MAX_SUPPORT_HEIGHT);
++	/*
++	 * Limit to Atmel ISI hardware capabilities. JPEG data arrives in the
++	 * sensor's fixed line framing, so the image size isn't limited by it.
++	 */
++	if (isi_fmt->fourcc != V4L2_PIX_FMT_JPEG) {
++		pixfmt->width = clamp(pixfmt->width, 0U, MAX_SUPPORT_WIDTH);
++		pixfmt->height = clamp(pixfmt->height, 0U, MAX_SUPPORT_HEIGHT);
++	}
+ 
+ 	v4l2_fill_mbus_format(&format.format, pixfmt, isi_fmt->mbus_code);
+ 
+@@ -617,8 +652,13 @@
+ 	v4l2_fill_pix_format(pixfmt, &format.format);
+ 
+ 	pixfmt->field = V4L2_FIELD_NONE;
+-	pixfmt->bytesperline = pixfmt->width * isi_fmt->bpp;
+-	pixfmt->sizeimage = pixfmt->bytesperline * pixfmt->height;
++	if (isi_fmt->fourcc == V4L2_PIX_FMT_JPEG) {
++		pixfmt->bytesperline = 0;
++		pixfmt->sizeimage = ISI_JPEG_SIZEIMAGE;
++	} else {
++		pixfmt->bytesperline = pixfmt->width * isi_fmt->bpp;
++		pixfmt->sizeimage = pixfmt->bytesperline * pixfmt->height;
++	}
+ 
+ 	if (current_fmt)
+ 		*current_fmt = isi_fmt;
+@@ -1029,6 +1069,11 @@
+ 		.bpp = 2,
+ 		.swap = ISI_CFG2_YCC_SWAP_MODE_1,
+ 	}, {
++		.fourcc = V4L2_PIX_FMT_JPEG,
++		.mbus_code = MEDIA_BUS_FMT_JPEG_1X8,
++		.bpp = 1,
++		.swap = ISI_CFG2_YCC_SWAP_DEFAULT,
++	}, {
+ 		.fourcc = V4L2_PIX_FMT_GREY,
+ 		.mbus_code = MEDIA_BUS_FMT_Y10_1X10,
+ 		.bpp = 1,

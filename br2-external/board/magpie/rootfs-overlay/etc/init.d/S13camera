@@ -1,0 +1,30 @@
+#!/bin/sh
+# Load the camera modules (atmel-isi, ov5640) in the background. Runs after S05healthy has marked
+# the system healthy and after S12peripherals (i2c-gpio), so a hang or failure here can't delay the
+# boot or the healthy marker. Logs the result and /dev/video* to the kernel log.
+log() { echo "S13camera: $*" > /dev/kmsg 2>/dev/null; }
+
+[ "$1" = start ] || exit 0
+log "start (background)"
+
+(
+	for m in atmel-isi ov5640; do
+		if modprobe "$m" > /dev/null 2>&1; then
+			log "modprobe $m ok"
+		else
+			log "modprobe $m FAILED"
+		fi
+	done
+	# the video node appears when the sensor probes and binds (async); give it a few seconds
+	i=0
+	while [ "$i" -lt 10 ] && ! ls /dev/video* > /dev/null 2>&1; do
+		sleep 1
+		i=$((i + 1))
+	done
+	if v=$(ls /dev/video* 2>/dev/null); then
+		log "video nodes: $(echo $v)"
+	else
+		log "no /dev/video* after modprobe"
+	fi
+) > /dev/null 2>&1 &
+exit 0

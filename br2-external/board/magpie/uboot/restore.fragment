@@ -1,0 +1,69 @@
+# U-Boot config fragment for the magpie "ums" restore image.
+# Applied on top of at91sam9x5ek_mmc_defconfig.
+
+# Run from SDRAM after SAM-BA: the ROM left clocks and SDRAM set up.
+CONFIG_SKIP_LOWLEVEL_INIT=y
+# CONFIG_SD_BOOT is not set
+CONFIG_TEXT_BASE=0x21100000
+CONFIG_SYS_LOAD_ADDR=0x20800000
+CONFIG_DEFAULT_DEVICE_TREE="at91sam9g25-magpie"
+# CONFIG_DEBUG_UART is not set
+
+# Straight into mass storage, no prompt wait, no console wired. Ejecting the
+# drive on the host ends ums, then reset (restore.py set BSC_CR back to 4).
+CONFIG_BOOTDELAY=0
+CONFIG_USE_BOOTCOMMAND=y
+# Progress markers in GPBR1 (0xFFFFFE64, battery-backed, unused by the stock
+# firmware): read it from Linux afterwards (devmem 0xfffffe64). 0xb0070001 = bootcmd
+# reached, ..02 = eMMC ok, ..03 = ums returned normally, ..e1 = mmc dev failed,
+# ..e2 = ums failed. restore.py clears it before go.
+CONFIG_BOOTCOMMAND="mw.l 0xfffffe64 0xb0070001; if mmc dev 0; then mw.l 0xfffffe64 0xb0070002; if ums 0 mmc 0; then mw.l 0xfffffe64 0xb0070003; else mw.l 0xfffffe64 0xb00700e2; fi; else mw.l 0xfffffe64 0xb00700e1; fi; reset"
+# CONFIG_USE_BOOTARGS is not set
+
+# Never any persistent environment.
+# CONFIG_ENV_IS_IN_FAT is not set
+CONFIG_ENV_IS_NOWHERE=y
+# CONFIG_CMD_SAVEENV is not set
+# CONFIG_CMD_ENV_FLAGS is not set
+
+# Not wanted: nothing else on the board gets probed or written.
+# CONFIG_CMD_NAND is not set
+# CONFIG_CMD_NAND_TRIMFFS is not set
+# CONFIG_CMD_UBI is not set
+# CONFIG_CMD_MTDPARTS is not set
+# CONFIG_CMD_DHCP is not set
+# CONFIG_CMD_PING is not set
+# CONFIG_BOOTP_BOOTFILESIZE is not set
+# CONFIG_CMD_FAT is not set
+# CONFIG_MTD is not set
+# CONFIG_MTD_RAW_NAND is not set
+# CONFIG_NAND_ATMEL is not set
+# CONFIG_ATMEL_NAND_HW_PMECC is not set
+# CONFIG_DM_SPI_FLASH is not set
+# CONFIG_SPI_FLASH_ATMEL is not set
+# CONFIG_SPI is not set
+# CONFIG_DM_SPI is not set
+# CONFIG_MACB is not set
+# CONFIG_USB_EHCI_HCD is not set
+# CONFIG_USB_STORAGE is not set
+# CONFIG_VIDEO is not set
+# CONFIG_ATMEL_HLCD is not set
+
+# eMMC on MCI0
+CONFIG_CMD_MMC=y
+CONFIG_GENERIC_ATMEL_MCI=y
+
+# UDPHS gadget, mass storage
+# The gadget's DT clocks are <&utmi>, <&udphs_clk>. The legacy UTMI clock driver
+# (compat.c) is only built with AT91_UTMI; without it the UDC probe fails and ums
+# exits at once. It's a no-op here: the ROM leaves the UPLL locked.
+CONFIG_AT91_UTMI=y
+CONFIG_USB=y
+CONFIG_USB_GADGET=y
+CONFIG_DM_USB_GADGET=y
+CONFIG_USB_GADGET_ATMEL_USBA=y
+CONFIG_USB_GADGET_DOWNLOAD=y
+CONFIG_USB_GADGET_MANUFACTURER="Magpie"
+CONFIG_USB_GADGET_VENDOR_NUM=0x0525
+CONFIG_USB_GADGET_PRODUCT_NUM=0xa4a5
+CONFIG_CMD_USB_MASS_STORAGE=y

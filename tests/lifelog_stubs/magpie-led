@@ -1,0 +1,2 @@
+#!/bin/sh
+echo "magpie-led $*" >> "$STUB_STATE/calls"

@@ -1,0 +1,2 @@
+#!/bin/sh
+cat "$STUB_STATE/dmesg" 2>/dev/null

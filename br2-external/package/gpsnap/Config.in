@@ -1,0 +1,7 @@
+config BR2_PACKAGE_GPSNAP
+	bool "gpsnap"
+	help
+	  Raw-sample snapshot capture for the CellGuide ACLYS GPS chip
+	  of the Narrative Clip (SPI1 via spidev, GPIO character
+	  device). Reproduces the stock aclys_snap tool. Depends only
+	  on libc and the kernel UAPI headers.

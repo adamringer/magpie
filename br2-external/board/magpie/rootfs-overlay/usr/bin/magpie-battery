@@ -1,0 +1,22 @@
+#!/bin/sh
+# magpie-battery: enable the divider (PB14), sample ADC channel 5, print raw and ADC-pin mV
+. /usr/lib/magpie-gpio.sh
+g=$(gpio_line B 14) || { echo "magpie-battery: cannot export PB14" >&2; exit 1; }
+d=
+for i in /sys/bus/iio/devices/iio:device*; do
+	[ -r "$i/in_voltage5_raw" ] && d=$i && break
+done
+[ -n "$d" ] || { echo "magpie-battery: no ADC channel 5 (is at91_adc loaded?)" >&2; exit 1; }
+echo high > "$g/direction"
+sleep 0.01 2>/dev/null || sleep 1
+raw=$(cat "$d/in_voltage5_raw" 2>/dev/null)
+echo low > "$g/direction"
+[ -n "$raw" ] || { echo "magpie-battery: read failed" >&2; exit 1; }
+scale=$(cat "$d/in_voltage_scale" 2>/dev/null)
+echo "raw: $raw"
+if [ -n "$scale" ]; then
+	echo "scale: $scale mV/LSB"
+	echo "ADC pin: $(awk "BEGIN{printf \"%.0f\", $raw * $scale}") mV (divider ratio unknown: not the battery voltage)"
+else
+	echo "ADC pin: scale unavailable (divider ratio unknown)"
+fi

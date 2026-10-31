@@ -1,0 +1,341 @@
+#!/bin/sh
+# magpie-lifelogd: lifelog daemon. While VBUS is present it does nothing (docked: USB Ethernet, charging).
+# Without VBUS it runs one cycle and powers off with an RTC alarm and the accelerometer armed for a tap:
+# battery check, position, photo + GPS snapshot, smart skips, next alarm, log line. See docs/LIFELOG.md.
+# No set -e: every helper may fail and the cycle must still end in a power-off.
+set -u
+LIFELOG_LIB=${LIFELOG_LIB:-/usr/lib/magpie-lifelog.sh}
+. "$LIFELOG_LIB" || exit 1
+ll_load_conf
+
+CSV_HEADER="date,wake,up_start_s,battery,x_raw,y_raw,z_raw,x_mg,y_mg,z_mg,photo,photo_bytes,photo_ok,gps_ok,facedown,dark,period_s,alarm_s,up_end_s,end"
+FD_COUNT=0
+DARK_COUNT=0
+
+# ---- VBUS ----
+# 0 = present, 1 = absent, 2 = unknown (devmem failed: treated like docked, never powers off)
+vbus_state() {
+	v=$($DEVMEM "$PIOC_PDSR" 32 2> /dev/null)
+	case "$v" in 0x[0-9a-fA-F]* | [0-9]*) ;; *) return 2 ;; esac
+	[ $((v & 0x80000000)) -eq 0 ] && return 0
+	return 1
+}
+
+# ---- small helpers ----
+with_timeout() { # seconds command...
+	_t=$1
+	shift
+	if [ -n "$TIMEOUT_CMD" ]; then $TIMEOUT_CMD "$_t" "$@"; else "$@"; fi
+}
+
+# run_logged LABEL cmd...: run, log its last output lines, keep its exit status
+run_logged() {
+	_l=$1
+	shift
+	_out=$("$@" 2>&1)
+	_rc=$?
+	[ -n "$_out" ] && ll_log "$_l: $(echo "$_out" | tail -n 3 | tr '\n' ' ')"
+	return $_rc
+}
+
+wake_source() {
+	$DMESG_CMD 2> /dev/null | grep 'Wake-Up source' | tail -n 1 | sed 's/.*Wake-Up source: *//'
+}
+
+read_battery() {
+	$BATTERY_CMD 2> /dev/null | sed -n 's/^raw: *\([0-9][0-9]*\).*/\1/p' | head -n 1
+}
+
+# The boot counter (GPBR2) is incremented by the bootloader on every boot; 4 boots without clearing = SAM-BA.
+# S05healthy normally clears it, but only when usb0 is up; every lifelog cycle is a boot, so clear it here too.
+fix_boot_counter() {
+	c=$($DEVMEM "$GPBR2" 32 2> /dev/null)
+	case "$c" in 0x[0-9a-fA-F]* | [0-9]*) if [ $((c)) -ne 0 ]; then
+		$DEVMEM "$GPBR2" 32 0 2> /dev/null
+		ll_log "boot counter was $c, cleared"
+	fi ;; esac
+	m=$($DEVMEM "$GPBR1" 32 2> /dev/null)
+	case "$m" in 0x[0-9a-fA-F]* | [0-9]*) [ $((m)) -ne $((HEALTHY_MARK)) ] && $DEVMEM "$GPBR1" 32 "$HEALTHY_MARK" 2> /dev/null ;; esac
+	return 0
+}
+
+load_state() {
+	FD_COUNT=0
+	DARK_COUNT=0
+	[ -f "$LL_DIR/state" ] || return 0
+	while IFS='=' read -r k v; do
+		case "$v" in '' | *[!0-9]*) continue ;; esac
+		case "$k" in
+		fd_count) FD_COUNT=$v ;;
+		dark_count) DARK_COUNT=$v ;;
+		esac
+	done < "$LL_DIR/state"
+}
+
+save_state() {
+	ll_ensure_dir || return 0
+	printf 'fd_count=%s\ndark_count=%s\n' "$FD_COUNT" "$DARK_COUNT" > "$LL_DIR/state.tmp" 2> /dev/null &&
+		mv -f "$LL_DIR/state.tmp" "$LL_DIR/state" 2> /dev/null
+}
+
+write_csv() { # end-reason
+	ll_ensure_dir || return 0
+	ll_rotate "$LL_DIR/log.csv"
+	[ -f "$LL_DIR/log.csv" ] || echo "$CSV_HEADER" > "$LL_DIR/log.csv" 2> /dev/null
+	echo "$(ll_now),$wake,$up_start,$battery,$xr,$yr,$zr,$xm,$ym,$zm,$photo,$photo_bytes,$photo_ok,$gps_ok,$fd,$dark,$period,$alarm,$(ll_uptime),$1" >> "$LL_DIR/log.csv" 2> /dev/null
+}
+
+# RTC alarm: relative, then verified by reading it back. 0 = armed.
+set_alarm() { # seconds
+	_n=$1
+	_try=0
+	while [ "$_try" -lt 3 ]; do
+		echo 0 > "$RTC_DIR/wakealarm" 2> /dev/null
+		if echo "+$_n" > "$RTC_DIR/wakealarm" 2> /dev/null; then
+			_a=$(cat "$RTC_DIR/wakealarm" 2> /dev/null)
+			case "$_a" in
+			+[0-9]*) _d=${_a#+} ;; # a plain file (host tests) keeps the text we wrote
+			[0-9]*)
+				_now=$(cat "$RTC_DIR/since_epoch" 2> /dev/null)
+				case "$_now" in '' | *[!0-9]*) _d=-1 ;; *) _d=$((_a - _now)) ;; esac
+				;;
+			*) _d=-1 ;;
+			esac
+			case "$_d" in '' | *[!0-9]*) ;; *)
+				[ "$_d" -ge 1 ] && [ "$_d" -le $((_n + 3)) ] && return 0
+				;;
+			esac
+			ll_log "alarm +$_n not accepted (read back '$_a')"
+		else
+			ll_log "writing +$_n to wakealarm failed"
+		fi
+		_try=$((_try + 1))
+		$SLEEP_CMD 1
+	done
+	return 1
+}
+
+disarm_alarm() { echo 0 > "$RTC_DIR/wakealarm" 2> /dev/null; }
+
+do_poweroff() {
+	sync
+	ll_log "powering off"
+	$POWEROFF_CMD
+	ll_log "poweroff returned"
+	$SLEEP_CMD 5
+	[ -n "$POWEROFF_FALLBACK" ] && $POWEROFF_FALLBACK
+	exit 1
+}
+
+facedown_check() { # uses xm ym zm; sets fd
+	fd=0
+	[ -n "$FACEDOWN_AXIS" ] || return 0
+	case "$FACEDOWN_AXIS" in
+	x) _a=$xm; _o1=$ym; _o2=$zm ;;
+	y) _a=$ym; _o1=$xm; _o2=$zm ;;
+	*) _a=$zm; _o1=$xm; _o2=$ym ;;
+	esac
+	case "$_a$_o1$_o2" in '' | *[!0-9-]*) return 0 ;; esac
+	[ -n "$_a" ] && [ -n "$_o1" ] && [ -n "$_o2" ] || return 0
+	_s=$((_a * FACEDOWN_SIGN))
+	_o1=${_o1#-}
+	_o2=${_o2#-}
+	if [ "$_s" -ge "$FACEDOWN_THRESHOLD" ] && [ "$_o1" -lt "$FACEDOWN_OTHER_MAX" ] && [ "$_o2" -lt "$FACEDOWN_OTHER_MAX" ]; then
+		fd=1
+	fi
+	return 0
+}
+
+wait_devices() {
+	_t=0
+	while [ "$_t" -lt "$WAIT_TIMEOUT" ]; do
+		[ -e "$VIDEO_NODE" ] && { [ "$GPS" != 1 ] || [ -e "$SPI_NODE" ]; } && return 0
+		$SLEEP_CMD 1
+		_t=$((_t + 1))
+	done
+	[ -e "$VIDEO_NODE" ] || ll_log "no $VIDEO_NODE after ${WAIT_TIMEOUT}s, no photo"
+	[ "$GPS" != 1 ] || [ -e "$SPI_NODE" ] || ll_log "no $SPI_NODE after ${WAIT_TIMEOUT}s, no GPS snapshot"
+	return 0
+}
+
+# One 100 ms blink per photo. BLINK_LEVEL=1: LEDs 1..N show the battery level (stock tap-wake thresholds:
+# LED 1, plus 2 above 220, 3 above 225, 4 above 235); otherwise LED BLINK_LED alone.
+blink() {
+	[ "$BLINK" = 1 ] || return 0
+	_leds=$BLINK_LED
+	if [ "$BLINK_LEVEL" = 1 ]; then
+		_leds=1
+		case "${battery:-}" in '' | *[!0-9]*) ;; *)
+			[ "$battery" -gt 220 ] && _leds="$_leds 2"
+			[ "$battery" -gt 225 ] && _leds="$_leds 3"
+			[ "$battery" -gt 235 ] && _leds="$_leds 4"
+			;;
+		esac
+	fi
+	for _l in $_leds; do $LED_CMD "$_l" on > /dev/null 2>&1; done
+	$SLEEP_CMD 0.1
+	for _l in $_leds; do $LED_CMD "$_l" off > /dev/null 2>&1; done
+}
+
+# ---- one lifelog cycle; returns only when it did not power off ----
+run_cycle() {
+	up_start=$(ll_uptime)
+	wake=$WAKE_SRC
+	battery= xr= yr= zr= xm= ym= zm= photo= photo_bytes= photo_ok=0 gps_ok=0 fd=0 dark=0 period= alarm=
+	ll_log "cycle start: wake '$wake', uptime ${up_start}s"
+	DATA=0
+	ll_data_ok && DATA=1
+	[ "$DATA" = 1 ] || ll_log "/data is not mounted: no photo, no log files"
+	fix_boot_counter
+
+	# a. battery (two readings, so one noisy sample can't switch it off)
+	battery=$(read_battery)
+	if [ -z "$battery" ]; then
+		ll_log "battery read failed"
+	elif [ "$battery" -lt "$OFF_LEVEL" ]; then
+		$SLEEP_CMD 1
+		b2=$(read_battery)
+		if [ -n "$b2" ] && [ "$b2" -lt "$OFF_LEVEL" ]; then
+			battery=$b2
+			ll_log "battery $battery < $OFF_LEVEL: powering off, only USB wakes it"
+			disarm_alarm
+			$ACCEL_CMD prep > /dev/null 2>&1
+			run_logged "accel" $ACCEL_CMD wake none
+			write_csv lowbat
+			do_poweroff
+		fi
+		battery=${b2:-$battery}
+	fi
+	[ -n "$battery" ] && [ "$battery" -le "$WARN_LEVEL" ] && ll_log "WARNING battery $battery <= $WARN_LEVEL"
+
+	# position (this also unloads the kernel accelerometer driver for the rest of the boot)
+	if $ACCEL_CMD prep > /dev/null 2>&1; then
+		_s=$($ACCEL_CMD sample 2> /dev/null)
+		set -- $_s
+		if [ $# -eq 6 ]; then
+			xr=$1 yr=$2 zr=$3 xm=$4 ym=$5 zm=$6
+		else
+			ll_log "accelerometer sample failed"
+		fi
+	else
+		ll_log "accelerometer prep failed"
+	fi
+	facedown_check
+
+	# c. photo + GPS snapshot (skipped when face down, as stock does)
+	if [ "$fd" = 1 ]; then
+		ll_log "face down (x=$xm y=$ym z=$zm mg): no photo"
+	elif [ "$DATA" = 1 ]; then
+		wait_devices
+		mkdir -p "$PHOTO_DIR" 2> /dev/null
+		stem=$PHOTO_DIR/$(date '+%Y%m%d-%H%M%S')
+		photo=$stem.jpg
+		if [ -e "$VIDEO_NODE" ]; then
+			run_logged "snap" with_timeout "$SNAP_TIMEOUT" $SNAP_CMD -o "$photo" && photo_ok=1
+			photo_bytes=$(wc -c < "$photo" 2> /dev/null)
+			case "$photo_bytes" in '' | *[!0-9]*) photo_bytes=0 ;; esac
+			[ "$photo_bytes" -gt 0 ] || photo_ok=0
+			if [ "$photo_ok" = 1 ]; then
+				blink
+				[ "$photo_bytes" -lt "$DARK_JPEG_BYTES" ] && dark=1
+			else
+				ll_log "photo failed"
+			fi
+		fi
+		if [ "$GPS" = 1 ] && [ -e "$SPI_NODE" ]; then
+			# shellcheck disable=SC2086
+			run_logged "gpsnap" with_timeout "$GPSNAP_TIMEOUT" $GPSNAP_CMD $GPS_ARGS -o "$stem.snap" && gps_ok=1
+			[ "$gps_ok" = 1 ] || ll_log "gps snapshot failed"
+		fi
+	fi
+
+	# d. skip streaks (as the original firmware does); counters are compared before they are incremented
+	load_state
+	period=$INTERVAL
+	if [ "$fd" = 1 ]; then
+		_p=$FACEDOWN_INTERVAL
+		[ "$FD_COUNT" -gt "$FACEDOWN_LONG_AFTER" ] && _p=$FACEDOWN_LONG_INTERVAL
+		FD_COUNT=$((FD_COUNT + 1))
+		DARK_COUNT=0
+		[ "$_p" -gt "$period" ] && period=$_p
+	else
+		FD_COUNT=0
+		if [ "$dark" = 1 ]; then
+			_p=$INTERVAL
+			[ "$DARK_COUNT" -gt "$DARK_AFTER" ] && _p=$DARK_INTERVAL
+			[ "$DARK_COUNT" -gt "$DARK_LONG_AFTER" ] && _p=$DARK_LONG_INTERVAL
+			DARK_COUNT=$((DARK_COUNT + 1))
+			[ "$_p" -gt "$period" ] && period=$_p
+		elif [ "$photo_ok" = 1 ]; then
+			DARK_COUNT=0
+		fi
+	fi
+	save_state
+
+	# e. next alarm, wake to wake
+	alarm=$((period - $(ll_uptime) - BOOT_PREAMBLE))
+	[ "$alarm" -lt "$MIN_ALARM" ] && alarm=$MIN_ALARM
+	if ! set_alarm "$alarm"; then
+		ll_log "RTC alarm could not be set: staying awake, retry in ${NOALARM_RETRY}s"
+		disarm_alarm
+		write_csv noalarm
+		$SLEEP_CMD "$NOALARM_RETRY"
+		return 0
+	fi
+
+	# f. accelerometer wake, last VBUS check, log, power off
+	run_logged "accel" $ACCEL_CMD wake "$ACCEL_WAKE" || ll_log "accelerometer wake setup had problems; the RTC alarm still wakes it"
+	vbus_state
+	if [ $? -eq 0 ]; then
+		ll_log "VBUS is back: alarm disarmed, staying docked"
+		disarm_alarm
+		run_logged "accel" $ACCEL_CMD wake none
+		write_csv docked
+		return 0
+	fi
+	write_csv poweroff
+	do_poweroff
+}
+
+# ---- main loop ----
+main() {
+	WAKE_SRC=$(wake_source)
+	[ -n "$WAKE_SRC" ] || WAKE_SRC=none
+	ll_log "start: wake '$WAKE_SRC', interval ${INTERVAL}s, gps $GPS, faceDown axis '${FACEDOWN_AXIS:-off}', accel wake $ACCEL_WAKE"
+	need=$VBUS_CHECKS
+	[ "$WAKE_SRC" != none ] && need=1 # RTC / WKUP0 wake: don't wait for the debounce
+	unplugged=0
+	off_logged=0
+	data_waited=0
+	loops=0
+	while :; do
+		vbus_state
+		if [ $? -eq 1 ]; then unplugged=$((unplugged + 1)); else unplugged=0; fi
+		if [ "$unplugged" -ge "$need" ]; then
+			need=$VBUS_CHECKS
+			if [ "$data_waited" = 0 ]; then
+				data_waited=1
+				_w=0
+				while [ "$_w" -lt "$DATA_WAIT" ] && ! ll_data_ok; do
+					$SLEEP_CMD 1
+					_w=$((_w + 1))
+				done
+			fi
+			if ll_data_ok && [ -e "$OFF_FILE" ]; then
+				if [ "$off_logged" = 0 ]; then
+					off_logged=1
+					ll_log "$OFF_FILE exists: no lifelog cycles (unplugged and staying on)"
+				fi
+			else
+				off_logged=0
+				run_cycle
+			fi
+			unplugged=0
+		fi
+		loops=$((loops + 1))
+		[ "${LIFELOG_MAX_LOOPS:-0}" -gt 0 ] && [ "$loops" -ge "${LIFELOG_MAX_LOOPS:-0}" ] && exit 0
+		$SLEEP_CMD "${LOOP_SLEEP:-1}"
+	done
+}
+
+main

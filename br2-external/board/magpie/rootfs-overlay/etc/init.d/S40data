@@ -1,0 +1,50 @@
+#!/bin/sh
+# Mount /data (ext4 p3) and save this boot's dmesg + the previous boot's pstore to
+# /data/logs/boot-N (keep 10). Runs in the background so a slow or hung mount can't block the boot.
+log() { echo "S40data: $*" > /dev/kmsg 2>/dev/null; }
+
+[ "$1" = start ] || exit 0
+log "start (background)"
+
+(
+	if ! mountpoint -q /data; then
+		if mount -t ext4 -o rw,noatime,errors=remount-ro /dev/mmcblk0p3 /data 2>/dev/null; then
+			log "/data mounted"
+		else
+			log "/data mount FAILED"
+			exit 0
+		fi
+	fi
+
+	L=/data/logs
+	mkdir -p "$L" || exit 0
+	n=0
+	[ -f "$L/count" ] && read n < "$L/count"
+	case "$n" in ''|*[!0-9]*) n=0 ;; esac
+	n=$((n + 1))
+	echo "$n" > "$L/count"
+	d="$L/boot-$n"
+	mkdir -p "$d" || exit 0
+
+	{ date; uname -a; cat /proc/cmdline; echo "GPBR1: $(devmem 0xfffffe64 32 2>/dev/null)"; } > "$d/info.txt" 2>&1
+	dmesg > "$d/dmesg.txt" 2>&1
+
+	# Previous boot's console/oops (survives a warm reset). Copy, then free the slots.
+	if ls /sys/fs/pstore/* > /dev/null 2>&1; then
+		mkdir -p "$d/pstore"
+		for f in /sys/fs/pstore/*; do
+			cp "$f" "$d/pstore/" 2>/dev/null && rm -f "$f"
+		done
+	fi
+
+	# Keep the last 10 boots.
+	old=$((n - 10))
+	while [ "$old" -gt 0 ]; do
+		[ -d "$L/boot-$old" ] || break
+		rm -rf "$L/boot-$old"
+		old=$((old - 1))
+	done
+	sync
+	log "logs saved in $d"
+) < /dev/null > /dev/null 2>&1 &
+exit 0

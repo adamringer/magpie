@@ -1,0 +1,5 @@
+#!/bin/sh
+# stub magpie-charge: prints what $STUB_STATE/charge says ("charging" or "not charging"); fails if the file is missing
+[ -f "$STUB_STATE/charge" ] || exit 1
+echo "$(cat "$STUB_STATE/charge") (raw PD15=x)"
+echo "magpie-charge" >> "$STUB_STATE/charge_reads"

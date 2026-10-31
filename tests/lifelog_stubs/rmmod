@@ -1,0 +1,2 @@
+#!/bin/sh
+echo "rmmod $*" >> "$STUB_STATE/calls"

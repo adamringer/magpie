@@ -1,0 +1,60 @@
+#!/bin/sh
+# magpie-usbmode <ether|storage>: switch the USB gadget between ECM (0525:a4a1) and mass storage (0525:a4a5)
+G=/sys/kernel/config/usb_gadget/magpie
+DEV=/dev/mmcblk0p3
+[ -d "$G" ] || { echo "magpie-usbmode: no gadget at $G" >&2; exit 1; }
+
+unbind() { echo "" > "$G/UDC" 2>/dev/null; }
+bind() {
+	udc=$(ls /sys/class/udc 2>/dev/null | head -n 1)
+	[ -n "$udc" ] && echo "$udc" > "$G/UDC"
+}
+
+case "$1" in
+storage)
+	[ -d "$G/functions/mass_storage.0" ] && { echo "already in storage mode"; exit 0; }
+	if mountpoint -q /data; then
+		umount /data || { echo "magpie-usbmode: /data is busy, not switching" >&2; exit 1; }
+	fi
+	echo "WARNING: the USB network link (telnet) drops now; eject the drive on the host to return to ether mode"
+	trap '' HUP PIPE
+	exec > /dev/null 2>&1
+	sleep 1
+	unbind
+	rm -f "$G/configs/c.1/ecm.usb0"
+	ifconfig usb0 down
+	rmdir "$G/functions/ecm.usb0"
+	mkdir "$G/functions/mass_storage.0" || exit 1
+	echo 1 > "$G/functions/mass_storage.0/lun.0/removable"
+	echo "$DEV" > "$G/functions/mass_storage.0/lun.0/file"
+	echo 0xa4a5 > "$G/idProduct"
+	echo "Mass storage" > "$G/configs/c.1/strings/0x409/configuration"
+	ln -s "$G/functions/mass_storage.0" "$G/configs/c.1/mass_storage.0"
+	bind
+	# Back to ether mode once the host ejects (f_mass_storage closes the file on LoEj)
+	while sleep 1; do
+		[ -d "$G/functions/mass_storage.0" ] || exit 0
+		[ -n "$(cat "$G/functions/mass_storage.0/lun.0/file" 2>/dev/null)" ] || exec "$0" ether
+	done
+	;;
+ether)
+	[ -d "$G/functions/ecm.usb0" ] && { echo "already in ether mode"; exit 0; }
+	unbind
+	rm -f "$G/configs/c.1/mass_storage.0"
+	echo "" > "$G/functions/mass_storage.0/lun.0/file" 2>/dev/null
+	rmdir "$G/functions/mass_storage.0"
+	mkdir "$G/functions/ecm.usb0" || exit 1
+	echo e6:11:22:33:44:55 > "$G/functions/ecm.usb0/host_addr"
+	echo e6:11:22:33:44:56 > "$G/functions/ecm.usb0/dev_addr"
+	echo 0xa4a1 > "$G/idProduct"
+	echo "ECM" > "$G/configs/c.1/strings/0x409/configuration"
+	ln -s "$G/functions/ecm.usb0" "$G/configs/c.1/ecm.usb0"
+	bind
+	ifconfig usb0 192.168.2.2 netmask 255.255.255.0 up
+	mountpoint -q /data || mount -t ext4 -o rw,noatime,errors=remount-ro "$DEV" /data
+	;;
+*)
+	echo "usage: magpie-usbmode <ether|storage>" >&2
+	exit 1
+	;;
+esac

@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+# Device dumps, downloads and decompiles: kept locally, not tracked.
+# Backups contain device identifiers.
+backup/
+analysis/
+downloads/
+decomp-uploader-win/
+*.bin
+*.ext2
+*.tgz
+
+buildroot/
+dl/
+output/
+output-restore/
+restore/*.elf
+tools/tapscope/tapscope
+tools/tapscope/clicktest

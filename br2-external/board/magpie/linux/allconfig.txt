@@ -1,0 +1,174 @@
+# Source for linux.config: symbols that get =y/=m on top of "make allnoconfig".
+# Regenerate with board/magpie/linux/regen-config.sh.
+
+# --- Core ---
+CONFIG_EXPERT=y
+CONFIG_CC_OPTIMIZE_FOR_SIZE=y
+CONFIG_SLUB_TINY=y
+CONFIG_MMU=y
+CONFIG_BLOCK=y
+CONFIG_MULTIUSER=y
+CONFIG_BINFMT_ELF=y
+CONFIG_PRINTK=y
+CONFIG_PRINTK_TIME=y
+CONFIG_LOG_BUF_SHIFT=15
+CONFIG_BUG=y
+# CONFIG_KALLSYMS is not set
+CONFIG_FUTEX=y
+CONFIG_POSIX_TIMERS=y
+CONFIG_FILE_LOCKING=y
+CONFIG_ADVISE_SYSCALLS=y
+CONFIG_SHMEM=y
+CONFIG_TTY=y
+CONFIG_UNIX98_PTYS=y
+CONFIG_PROC_FS=y
+CONFIG_PROC_SYSCTL=y
+CONFIG_SYSFS=y
+CONFIG_TMPFS=y
+CONFIG_DEVTMPFS=y
+CONFIG_DEVTMPFS_MOUNT=y
+CONFIG_MAGIC_SYSRQ=y
+CONFIG_DEVMEM=y
+CONFIG_MODULES=y
+CONFIG_MODULE_UNLOAD=y
+CONFIG_HIGH_RES_TIMERS=y
+CONFIG_NO_HZ_IDLE=y
+CONFIG_KERNEL_XZ=y
+
+# --- ARM / SoC: AT91SAM9G25, appended DTB, ignore the stock U-Boot's ATAGs ---
+CONFIG_ARCH_MULTIPLATFORM=y
+CONFIG_ARCH_MULTI_V5=y
+CONFIG_ARCH_AT91=y
+CONFIG_SOC_AT91SAM9=y
+CONFIG_ATMEL_CLOCKSOURCE_TCB=y
+CONFIG_AEABI=y
+CONFIG_UACCESS_WITH_MEMCPY=y
+CONFIG_ARM_APPENDED_DTB=y
+CONFIG_CMDLINE="console=ttyS0,115200 root=/dev/mmcblk0p2 rootfstype=squashfs ro rootwait=30 panic=10 oops=panic"
+CONFIG_CMDLINE_FORCE=y
+
+# --- Console (DBGU) ---
+CONFIG_SERIAL_ATMEL=y
+CONFIG_SERIAL_ATMEL_CONSOLE=y
+
+# --- Storage: eMMC on MCI0, squashfs root, ext4 data ---
+CONFIG_DMADEVICES=y
+CONFIG_AT_HDMAC=y
+CONFIG_MMC=y
+CONFIG_MMC_BLOCK=y
+CONFIG_MMC_ATMELMCI=y
+CONFIG_MISC_FILESYSTEMS=y
+CONFIG_SQUASHFS=y
+CONFIG_SQUASHFS_XZ=y
+CONFIG_EXT4_FS=y
+
+# --- Watchdog (already running; the driver keeps pinging it) ---
+CONFIG_WATCHDOG=y
+CONFIG_AT91SAM9X_WATCHDOG=y
+
+# --- RTC, power management, reset/poweroff ---
+CONFIG_RTC_CLASS=y
+CONFIG_RTC_INTF_SYSFS=y
+CONFIG_RTC_INTF_DEV=y
+CONFIG_RTC_DRV_AT91RM9200=y
+# Set the system clock from the RTC at boot (photos need the right date)
+CONFIG_RTC_HCTOSYS=y
+CONFIG_RTC_HCTOSYS_DEVICE="rtc0"
+CONFIG_PM=y
+CONFIG_SUSPEND=y
+CONFIG_POWER_RESET=y
+CONFIG_POWER_RESET_AT91_RESET=y
+CONFIG_POWER_RESET_AT91_POWEROFF=y
+CONFIG_GPIOLIB=y
+CONFIG_GPIO_CDEV=y
+CONFIG_GPIO_SYSFS=y
+
+# --- Crash log in RAM (ramoops region in the DT) and boot markers ---
+CONFIG_PSTORE=y
+CONFIG_PSTORE_CONSOLE=y
+CONFIG_PSTORE_RAM=y
+CONFIG_MAGPIE_BOOTMARK=y
+CONFIG_AT91_SAM9_BACKUP_SLEEP=y
+
+# --- USB device (UDPHS): ECM network + mass storage via configfs ---
+CONFIG_NET=y
+CONFIG_PACKET=y
+CONFIG_UNIX=y
+CONFIG_INET=y
+CONFIG_NETDEVICES=y
+CONFIG_USB_SUPPORT=y
+CONFIG_USB_GADGET=y
+CONFIG_USB_ATMEL_USBA=y
+CONFIG_CONFIGFS_FS=y
+CONFIG_USB_CONFIGFS=y
+CONFIG_USB_CONFIGFS_ECM=y
+CONFIG_USB_CONFIGFS_MASS_STORAGE=y
+
+# --- GPS access (ACLYS on SPI1) ---
+CONFIG_SPI=y
+CONFIG_SPI_ATMEL=m
+CONFIG_SPI_SPIDEV=m
+CONFIG_UIO=m
+CONFIG_UIO_PDRV_GENIRQ=m
+
+# --- Later phases, as modules ---
+CONFIG_I2C=y
+CONFIG_I2C_CHARDEV=m
+CONFIG_I2C_AT91=m
+CONFIG_I2C_GPIO=m
+CONFIG_IIO=m
+# AT91_ADC depends on INPUT
+CONFIG_INPUT=m
+CONFIG_AT91_ADC=m
+CONFIG_IIO_ST_ACCEL_3AXIS=m
+CONFIG_IIO_ST_ACCEL_I2C_3AXIS=m
+CONFIG_AK8975=m
+CONFIG_NEW_LEDS=y
+CONFIG_LEDS_CLASS=m
+CONFIG_LEDS_GPIO=m
+CONFIG_LEDS_PWM=m
+CONFIG_LEDS_TRIGGERS=y
+CONFIG_LEDS_TRIGGER_TIMER=m
+CONFIG_LEDS_TRIGGER_HEARTBEAT=m
+CONFIG_LEDS_TRIGGER_DEFAULT_ON=m
+CONFIG_PWM=y
+CONFIG_PWM_ATMEL=m
+
+# --- Camera (phase 3) ---
+# V4L2/media core as modules; only the camera (sensor) class is enabled, no tuners/USB/DVB/radio.
+CONFIG_MEDIA_SUPPORT=m
+CONFIG_MEDIA_SUPPORT_FILTER=y
+CONFIG_MEDIA_CAMERA_SUPPORT=y
+CONFIG_MEDIA_PLATFORM_SUPPORT=y
+CONFIG_MEDIA_PLATFORM_DRIVERS=y
+CONFIG_V4L_PLATFORM_DRIVERS=y
+CONFIG_VIDEO_CAMERA_SENSOR=y
+# Atmel ISI: receives the sensor's 8-bit parallel bus on PC0-PC7 and DMAs frames to memory
+CONFIG_VIDEO_ATMEL_ISI=m
+# OV5640 sensor (SCCB address 0x3C); delivers JPEG/YUV on the parallel bus
+CONFIG_VIDEO_OV5640=m
+# The sensor sits on a second bit-banged bus on PC8/PC9 (CONFIG_I2C_GPIO=m above)
+# CMA: the ISI needs physically contiguous buffers (about 2 MiB per full-size JPEG frame,
+# about 3 buffers) and 32 MB RAM fragments quickly. Built in so the area is reserved at boot.
+CONFIG_CMA=y
+CONFIG_DMA_CMA=y
+CONFIG_CMA_SIZE_MBYTES=6
+
+# --- Explicitly off (otherwise pulled in by defaults) ---
+# CONFIG_NET_RX_BUSY_POLL is not set
+
+# --- Review trims (2026-10-25) ---
+# MBR only on the eMMC: no GPT/EFI partition support
+CONFIG_PARTITION_ADVANCED=y
+CONFIG_MSDOS_PARTITION=y
+# CONFIG_EFI_PARTITION is not set
+# No core dumps
+# CONFIG_ELF_CORE is not set
+# CONFIG_COREDUMP is not set
+
+# Run #! scripts (init.d/rcS etc.). allnoconfig drops this; the first two boots died on "rcS: Exec format error".
+CONFIG_BINFMT_SCRIPT=y
+
+# musl uses the old 32-bit-time syscalls (nanosleep, futex, ppoll, ...) whenever the values fit
+# in 32 bits. Without this every sleep returned at once (ENOSYS): the watchdog loop spun at 100% CPU.
+CONFIG_COMPAT_32BIT_TIME=y

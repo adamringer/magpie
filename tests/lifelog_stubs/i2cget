@@ -1,0 +1,3 @@
+#!/bin/sh
+r=$(printf '%d' "$4")
+[ -f "$STUB_STATE/regs/$r" ] && cat "$STUB_STATE/regs/$r" || echo 0x00

@@ -1,0 +1,18 @@
+#!/bin/sh
+# magpie-led <1-4|all> <on|off|0-255>: set LED brightness via /sys/class/leds/magpie:dN
+usage() { echo "usage: magpie-led <1-4|all> <on|off|0-255>" >&2; exit 1; }
+[ $# -eq 2 ] || usage
+case "$1" in 1|2|3|4) leds=$1 ;; all) leds="1 2 3 4" ;; *) usage ;; esac
+case "$2" in
+on) v=255 ;;
+off) v=0 ;;
+''|*[!0-9]*) usage ;;
+*) v=$2; [ "$v" -le 255 ] || usage ;;
+esac
+rc=0
+for n in $leds; do
+	f=/sys/class/leds/magpie:d$n/brightness
+	[ -w "$f" ] || f=/sys/class/leds/d$n/brightness
+	if [ -w "$f" ]; then echo "$v" > "$f"; else echo "magpie-led: no LED d$n (modules loaded?)" >&2; rc=1; fi
+done
+exit $rc

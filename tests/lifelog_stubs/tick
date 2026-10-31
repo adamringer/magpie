@@ -1,0 +1,3 @@
+#!/bin/sh
+# stub sleep for magpie-chargeledd: marks the end of a loop iteration in the call log
+echo "tick" >> "$STUB_STATE/calls"

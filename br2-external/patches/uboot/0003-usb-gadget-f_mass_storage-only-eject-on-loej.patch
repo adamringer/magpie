@@ -1,0 +1,24 @@
+usb: gadget: f_mass_storage: only eject on LoEj without Start
+
+do_start_stop() treated every START/STOP UNIT as an eject, so a host
+sending a plain "start" ended ums at once. Check the LoEj and Start bits
+like the Linux gadget does, so only a real eject (e.g. udisksctl
+power-off) ends ums.
+
+--- a/drivers/usb/gadget/f_mass_storage.c	2026-10-25 13:29:40.950725450 -0400
++++ b/drivers/usb/gadget/f_mass_storage.c	2026-10-25 13:29:40.977530989 -0400
+@@ -1323,7 +1323,13 @@
+ 		return -EINVAL;
+ 	}
+ 
+-	common->eject = 1;
++	/*
++	 * Only a real eject (LoEj set, Start clear) ends ums. Hosts send
++	 * plain START/STOP UNIT too (e.g. Start=1), which must not drop the
++	 * drive.
++	 */
++	if ((common->cmnd[4] & 0x02) && !(common->cmnd[4] & 0x01))
++		common->eject = 1;
+ 
+ 	return 0;
+ }

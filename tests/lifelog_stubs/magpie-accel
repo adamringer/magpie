@@ -1,0 +1,7 @@
+#!/bin/sh
+echo "magpie-accel $*" >> "$STUB_STATE/calls"
+case "$1" in
+sample) cat "$STUB_STATE/accel" 2>/dev/null || echo "-15040 0 0 -940 0 0" ;;
+wake) [ -f "$STUB_STATE/accel_wake_fail" ] && exit 1 ;;
+esac
+exit 0

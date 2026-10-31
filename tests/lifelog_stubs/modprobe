@@ -1,0 +1,2 @@
+#!/bin/sh
+echo "modprobe $*" >> "$STUB_STATE/calls"

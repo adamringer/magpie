@@ -1,0 +1,62 @@
+soc: atmel: magpie-bootmark: restart if not healthy in time
+
+A running but unhealthy system (no USB gadget, hung userspace, or a
+root device that never appears) keeps the watchdog fed and never
+resets, so the boot counter never reaches its SAM-BA fallback. Unless
+userspace writes the healthy marker to GPBR1 within health_deadline
+seconds (default 120) of late init, write 0x4D5000dd and restart.
+
+--- a/drivers/soc/atmel/magpie-bootmark.c	2026-10-25 15:54:09.763536807 -0400
++++ b/drivers/soc/atmel/magpie-bootmark.c	2026-10-25 15:54:09.790990878 -0400
+@@ -12,12 +12,26 @@
+ #include <linux/io.h>
+ #include <linux/notifier.h>
+ #include <linux/panic_notifier.h>
++#include <linux/moduleparam.h>
++#include <linux/reboot.h>
++#include <linux/workqueue.h>
+ 
+ #define MAGPIE_GPBR1_PHYS		0xfffffe64
+ 
+ #define MAGPIE_MARK_RUNNING	0x4D500001	/* kernel is running */
+ #define MAGPIE_MARK_DRIVERS_DONE	0x4D500002	/* built-in drivers are done */
+ #define MAGPIE_MARK_PANIC		0x4D5000ff	/* panic, reboot follows */
++#define MAGPIE_MARK_HEALTHY	0x4D500020	/* written by userspace once healthy */
++#define MAGPIE_MARK_DEADLINE	0x4D5000dd	/* not healthy in time, restart follows */
++
++/*
++ * Seconds after late init by which userspace must have written
++ * MAGPIE_MARK_HEALTHY, else restart. A running but unhealthy system (e.g. no
++ * USB) would otherwise keep the watchdog fed and never reach the boot
++ * counter's SAM-BA fallback. 0 disables (magpie_bootmark.health_deadline=0).
++ */
++static unsigned int health_deadline = 120;
++module_param(health_deadline, uint, 0444);
+ 
+ static void __iomem *magpie_gpbr1;
+ 
+@@ -52,9 +66,24 @@
+ }
+ core_initcall(magpie_bootmark_early);
+ 
++static void magpie_health_check(struct work_struct *work)
++{
++	if (!magpie_gpbr1 || readl_relaxed(magpie_gpbr1) == MAGPIE_MARK_HEALTHY)
++		return;
++
++	pr_emerg("magpie-bootmark: not healthy after %us, restarting\n",
++		 health_deadline);
++	magpie_bootmark_write(MAGPIE_MARK_DEADLINE);
++	emergency_restart();
++}
++static DECLARE_DELAYED_WORK(magpie_health_work, magpie_health_check);
++
+ static int __init magpie_bootmark_late(void)
+ {
+ 	magpie_bootmark_write(MAGPIE_MARK_DRIVERS_DONE);
++	if (health_deadline)
++		schedule_delayed_work(&magpie_health_work,
++				      health_deadline * HZ);
+ 	return 0;
+ }
+ late_initcall_sync(magpie_bootmark_late);

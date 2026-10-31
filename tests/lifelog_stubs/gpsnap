@@ -1,0 +1,5 @@
+#!/bin/sh
+echo "gpsnap $*" >> "$STUB_STATE/calls"
+[ -f "$STUB_STATE/gps_fail" ] && exit 3
+while [ $# -gt 0 ]; do [ "$1" = -o ] && out=$2; shift; done
+head -c 1024 /dev/zero > "$out"

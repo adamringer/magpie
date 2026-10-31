@@ -1,0 +1,100 @@
+From: magpie <noreply@example.invalid>
+Subject: [PATCH] soc: atmel: add magpie boot progress markers
+
+Write boot progress markers to GPBR1 (0xFFFFFE64): 0x4D500001 when the kernel
+is running (core_initcall), 0x4D500002 when built-in drivers are done
+(late_initcall_sync) and 0x4D5000FF from a panic notifier.
+
+Signed-off-by: magpie <noreply@example.invalid>
+---
+diff --git a/drivers/soc/atmel/magpie-bootmark.c b/drivers/soc/atmel/magpie-bootmark.c
+--- /dev/null
++++ b/drivers/soc/atmel/magpie-bootmark.c
+@@ -0,0 +1,60 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Boot progress markers for the Narrative Clip 1 (AT91SAM9G25).
++ *
++ * Writes 32-bit markers to GPBR1 (physical 0xFFFFFE64) so that the boot stage
++ * reached can be read back after a reset. The sam9x5 device tree has no GPBR
++ * syscon node, so the register is mapped directly. GPBR0 (at91bootstrap) and
++ * GPBR2 (boot counter) are never touched.
++ */
++
++#include <linux/init.h>
++#include <linux/io.h>
++#include <linux/notifier.h>
++#include <linux/panic_notifier.h>
++
++#define MAGPIE_GPBR1_PHYS		0xfffffe64
++
++#define MAGPIE_MARK_RUNNING	0x4D500001	/* kernel is running */
++#define MAGPIE_MARK_DRIVERS_DONE	0x4D500002	/* built-in drivers are done */
++#define MAGPIE_MARK_PANIC		0x4D5000ff	/* panic, reboot follows */
++
++static void __iomem *magpie_gpbr1;
++
++static void magpie_bootmark_write(u32 mark)
++{
++	if (magpie_gpbr1)
++		writel_relaxed(mark, magpie_gpbr1);
++}
++
++static int magpie_bootmark_panic(struct notifier_block *nb, unsigned long ev,
++			       void *data)
++{
++	magpie_bootmark_write(MAGPIE_MARK_PANIC);
++	return NOTIFY_DONE;
++}
++
++static struct notifier_block magpie_bootmark_panic_nb = {
++	.notifier_call	= magpie_bootmark_panic,
++	.priority	= INT_MAX,
++};
++
++static int __init magpie_bootmark_early(void)
++{
++	magpie_gpbr1 = ioremap(MAGPIE_GPBR1_PHYS, sizeof(u32));
++	if (!magpie_gpbr1)
++		return 0;
++
++	magpie_bootmark_write(MAGPIE_MARK_RUNNING);
++	atomic_notifier_chain_register(&panic_notifier_list,
++				       &magpie_bootmark_panic_nb);
++	return 0;
++}
++core_initcall(magpie_bootmark_early);
++
++static int __init magpie_bootmark_late(void)
++{
++	magpie_bootmark_write(MAGPIE_MARK_DRIVERS_DONE);
++	return 0;
++}
++late_initcall_sync(magpie_bootmark_late);
+diff --git a/drivers/soc/atmel/Kconfig b/drivers/soc/atmel/Kconfig
+--- a/drivers/soc/atmel/Kconfig
++++ b/drivers/soc/atmel/Kconfig
+@@ -16,3 +16,15 @@
+ 
+ 	  This driver can also be built as a module. If so, the module
+ 	  will be called sfr.
++
++config MAGPIE_BOOTMARK
++	bool "magpie boot progress markers"
++	depends on ARCH_AT91 || COMPILE_TEST
++	help
++	  Write boot progress markers to the general purpose backup register
++	  GPBR1 of the Narrative Clip 1 (AT91SAM9G25), which survives a reset
++	  and can be read back by the ROM SAM-BA monitor. Markers are written
++	  when the kernel starts, when the built-in drivers are done and on
++	  panic. No other GPBR is touched. Only useful on that board.
++
++	  If unsure, say N.
+diff --git a/drivers/soc/atmel/Makefile b/drivers/soc/atmel/Makefile
+--- a/drivers/soc/atmel/Makefile
++++ b/drivers/soc/atmel/Makefile
+@@ -1,3 +1,4 @@
+ # SPDX-License-Identifier: GPL-2.0-only
+ obj-$(CONFIG_AT91_SOC_ID) += soc.o
+ obj-$(CONFIG_AT91_SOC_SFR) += sfr.o
++obj-$(CONFIG_MAGPIE_BOOTMARK) += magpie-bootmark.o

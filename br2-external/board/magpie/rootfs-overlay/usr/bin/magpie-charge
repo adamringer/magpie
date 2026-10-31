@@ -1,0 +1,8 @@
+#!/bin/sh
+# magpie-charge: read PD15 (nCHRG) and print charging / not charging
+. /usr/lib/magpie-gpio.sh
+g=$(gpio_line D 15) || { echo "magpie-charge: cannot export PD15" >&2; exit 1; }
+echo in > "$g/direction" 2>/dev/null
+v=$(cat "$g/value")  # BusyBox read returns empty on sysfs here
+# nCHRG is active-low: 0 while charging (seen on hardware from a drained battery), 1 when full
+if [ "$v" = 0 ]; then echo "charging (raw PD15=$v)"; else echo "not charging (raw PD15=$v)"; fi

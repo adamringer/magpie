@@ -1,0 +1,340 @@
+From: magpie <noreply@example.invalid>
+Subject: [PATCH] ARM: at91: pm: stock-style backup sleep for sam9x5
+
+Add an optional "mem" sleep for the SAM9x5 family that works the way the
+stock firmware did: put the SDRAM in self-refresh, cut VDDCORE through the
+shutdown controller and, on wake, let the at91bootstrap in SPI flash jump
+to a resume entry (GPBR0 magic, GPBR1 = entry, 0x2bedf00d before it) that
+continues in cpu_resume.
+
+Only the CPU context is restored; AIC, PIO and PMC are not. GPBR1 (also
+the boot progress marker) is saved and restored around the sleep, GPBR2
+(bootstrap boot counter) and GPBR0 are cleared afterwards, and GPBR3
+carries progress markers. Enabled by CONFIG_AT91_SAM9_BACKUP_SLEEP.
+
+Signed-off-by: magpie <noreply@example.invalid>
+---
+diff --git a/arch/arm/mach-at91/Kconfig b/arch/arm/mach-at91/Kconfig
+index c5ef27e..6f74e07 100644
+--- a/arch/arm/mach-at91/Kconfig
++++ b/arch/arm/mach-at91/Kconfig
+@@ -249,6 +249,16 @@ config SOC_SAMA5
+ config ATMEL_PM
+ 	bool
+ 
++config AT91_SAM9_BACKUP_SLEEP
++	bool "Stock-style backup sleep for SAM9x5 (SDRAM self-refresh, VDDCORE off)"
++	depends on ATMEL_PM && SOC_AT91SAM9
++	help
++	  Make "mem" suspend put the SDRAM in self-refresh and cut the core
++	  power through the shutdown controller. Needs an at91bootstrap that
++	  jumps to the address in GPBR1 when GPBR0 holds 0xCAFEBABE and the
++	  word before it is 0x2BEDF00D. Peripheral state (AIC, PIO, PMC) is
++	  not restored yet. Say n unless your board has such a bootstrap.
++
+ config ATMEL_SECURE_PM
+ 	bool "Atmel Secure PM support"
+ 	depends on SOC_SAMA5D2 && ATMEL_PM
+diff --git a/arch/arm/mach-at91/Makefile b/arch/arm/mach-at91/Makefile
+index 7d8a7bc..d1cce91 100644
+--- a/arch/arm/mach-at91/Makefile
++++ b/arch/arm/mach-at91/Makefile
+@@ -14,6 +14,7 @@ obj-$(CONFIG_SOC_SAMV7)		+= samv7.o
+ 
+ # Power Management
+ obj-$(CONFIG_ATMEL_PM)		+= pm.o pm_suspend.o
++obj-$(CONFIG_AT91_SAM9_BACKUP_SLEEP) += pm_sam9_backup.o pm_sam9_backup_asm.o
+ 
+ ifeq ($(CONFIG_PM_DEBUG),y)
+ CFLAGS_pm.o += -DDEBUG
+diff --git a/arch/arm/mach-at91/generic.h b/arch/arm/mach-at91/generic.h
+index acf0b3c..45ff521 100644
+--- a/arch/arm/mach-at91/generic.h
++++ b/arch/arm/mach-at91/generic.h
+@@ -8,6 +8,9 @@
+ #ifndef _AT91_GENERIC_H
+ #define _AT91_GENERIC_H
+ 
++#include <linux/errno.h>
++#include <linux/types.h>
++
+ #ifdef CONFIG_PM
+ extern void __init at91rm9200_pm_init(void);
+ extern void __init at91sam9_pm_init(void);
+@@ -26,4 +29,14 @@ static inline void __init sama5d2_pm_init(void) { }
+ static inline void __init sama7_pm_init(void) { }
+ #endif
+ 
++#ifdef CONFIG_AT91_SAM9_BACKUP_SLEEP
++extern void __init at91_sam9_backup_init(void);
++extern bool at91_sam9_backup_ready(void);
++extern int at91_sam9_backup_suspend(void);
++#else
++static inline void __init at91_sam9_backup_init(void) { }
++static inline bool at91_sam9_backup_ready(void) { return false; }
++static inline int at91_sam9_backup_suspend(void) { return -ENODEV; }
++#endif
++
+ #endif /* _AT91_GENERIC_H */
+diff --git a/arch/arm/mach-at91/pm.c b/arch/arm/mach-at91/pm.c
+index 35058b9..c8d0648 100644
+--- a/arch/arm/mach-at91/pm.c
++++ b/arch/arm/mach-at91/pm.c
+@@ -688,6 +688,11 @@ static int at91_pm_enter(suspend_state_t state)
+ 		    !at91_pm_verify_clocks())
+ 			goto error;
+ 
++		if (state == PM_SUSPEND_MEM && at91_sam9_backup_ready()) {
++			at91_sam9_backup_suspend();
++			break;
++		}
++
+ 		at91_pm_suspend(state);
+ 
+ 		break;
+@@ -1576,6 +1581,7 @@ void __init at91sam9_pm_init(void)
+ 		return;
+ 
+ 	at91_pm_init(at91sam9_idle);
++	at91_sam9_backup_init();
+ }
+ 
+ void __init sama5_pm_init(void)
+diff --git a/arch/arm/mach-at91/pm_sam9_backup.c b/arch/arm/mach-at91/pm_sam9_backup.c
+new file mode 100644
+index 0000000..6fa5ad0
+--- /dev/null
++++ b/arch/arm/mach-at91/pm_sam9_backup.c
+@@ -0,0 +1,154 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/*
++ * Backup sleep for the SAM9x5 family, as the stock firmware did it.
++ *
++ * The state is kept in the SDRAM (self-refresh) while the shutdown controller
++ * cuts VDDCORE. The at91bootstrap in SPI flash re-initializes the SDRAM and,
++ * if GPBR0 holds 0xCAFEBABE, clears it and jumps to the address in GPBR1
++ * (the word before it must be 0x2bedf00d). That address is
++ * at91_sam9_backup_resume, which continues in cpu_resume. The bootstrap also
++ * counts boots in GPBR2 and falls back to SAM-BA above 3, so GPBR2 is cleared
++ * before the power cut and again on resume.
++ *
++ * Only the CPU context is restored here; AIC, PIO and PMC state is not.
++ * GPBR3 gets progress markers that survive a reset.
++ */
++#include <linux/errno.h>
++#include <linux/genalloc.h>
++#include <linux/io.h>
++#include <linux/of.h>
++#include <linux/of_platform.h>
++#include <linux/platform_device.h>
++#include <linux/printk.h>
++
++#include <asm/cacheflush.h>
++#include <asm/fncpy.h>
++#include <asm/suspend.h>
++
++#include "generic.h"
++
++#define DDRSDRC_LPR_PHYS	0xffffe81c
++#define SHDW_CR_PHYS		0xfffffe10
++#define SHDW_SR			0x08
++#define BSC_CR_PHYS		0xfffffe54
++#define GPBR_PHYS		0xfffffe60
++#define RTC_SCCR_PHYS		0xfffffecc
++
++#define GPBR0			0x00
++#define GPBR1			0x04
++#define GPBR2			0x08
++#define GPBR3			0x0c
++
++#define BOOT_MAGIC		0xcafebabe
++#define BSC_CR_SPI_BOOT		0x66830004
++#define RTC_SCCR_ALL		0x1f
++
++#define MARK_SUSPENDING		0x4D505700
++#define MARK_BACK_IN_C		0x4D505702
++
++extern void at91_sam9_backup_resume(void);
++extern void at91_sam9_backup_sram(void __iomem *lpr, void __iomem *shdw_cr);
++extern char at91_sam9_backup_sram_end[];
++
++static void (*sram_fn)(void __iomem *, void __iomem *);
++static size_t sram_sz;
++static void __iomem *lpr, *shdwc, *bsc_cr, *gpbr, *rtc_sccr;
++
++static int at91_sam9_backup_finish(unsigned long val)
++{
++	flush_cache_all();
++	sram_fn(lpr, shdwc);
++	return -EIO;	/* not reached */
++}
++
++bool at91_sam9_backup_ready(void)
++{
++	return sram_fn != NULL;
++}
++
++int at91_sam9_backup_suspend(void)
++{
++	u32 saved_gpbr1;
++	int ret;
++
++	/* GPBR1 is also the boot progress marker: keep it across the sleep */
++	saved_gpbr1 = readl(gpbr + GPBR1);
++
++	writel(MARK_SUSPENDING, gpbr + GPBR3);
++	writel(0, gpbr + GPBR2);
++	writel(__pa_symbol(at91_sam9_backup_resume), gpbr + GPBR1);
++	writel(BSC_CR_SPI_BOOT, bsc_cr);
++	/* A stale RTC flag would turn the sleep into an immediate wake */
++	writel(RTC_SCCR_ALL, rtc_sccr);
++	writel(BOOT_MAGIC, gpbr + GPBR0);
++
++	flush_cache_all();
++	ret = cpu_suspend(0, at91_sam9_backup_finish);
++
++	writel(0, gpbr + GPBR0);
++	writel(0, gpbr + GPBR2);
++	writel(saved_gpbr1, gpbr + GPBR1);
++	writel(MARK_BACK_IN_C, gpbr + GPBR3);
++
++	/* The SRAM content is lost with the core power */
++	sram_fn = fncpy(sram_fn, &at91_sam9_backup_sram, sram_sz);
++
++	if (ret)
++		pr_info("at91-backup: suspend aborted (%d)\n", ret);
++	else
++		pr_info("at91-backup: resumed, SHDW_SR=0x%08x\n",
++			readl(shdwc + SHDW_SR));
++	return ret;
++}
++
++void __init at91_sam9_backup_init(void)
++{
++	struct device_node *node;
++	struct platform_device *pdev = NULL;
++	struct gen_pool *pool;
++	dma_addr_t phys;
++	void *sram;
++
++	sram_sz = at91_sam9_backup_sram_end - (char *)at91_sam9_backup_sram;
++
++	for_each_compatible_node(node, NULL, "mmio-sram") {
++		pdev = of_find_device_by_node(node);
++		if (pdev) {
++			of_node_put(node);
++			break;
++		}
++	}
++	if (!pdev) {
++		pr_warn("at91-backup: no SRAM device\n");
++		return;
++	}
++
++	pool = gen_pool_get(&pdev->dev, NULL);
++	if (!pool)
++		goto out;
++
++	/* fncpy() wants the destination aligned to 8 bytes */
++	sram = gen_pool_dma_alloc_align(pool, sram_sz, &phys, 8);
++	if (!sram)
++		goto out;
++
++	lpr = ioremap(DDRSDRC_LPR_PHYS, 4);
++	shdwc = ioremap(SHDW_CR_PHYS, 0x10);
++	bsc_cr = ioremap(BSC_CR_PHYS, 4);
++	gpbr = ioremap(GPBR_PHYS, 0x10);
++	rtc_sccr = ioremap(RTC_SCCR_PHYS, 4);
++	if (!lpr || !shdwc || !bsc_cr || !gpbr || !rtc_sccr) {
++		pr_warn("at91-backup: register mapping failed\n");
++		goto out;
++	}
++
++	sram_fn = __arm_ioremap_exec(phys, sram_sz, false);
++	if (!sram_fn) {
++		pr_warn("at91-backup: SRAM mapping failed\n");
++		goto out;
++	}
++	sram_fn = fncpy(sram_fn, &at91_sam9_backup_sram, sram_sz);
++	pr_info("at91-backup: sleep enabled\n");
++out:
++	put_device(&pdev->dev);
++}
+diff --git a/arch/arm/mach-at91/pm_sam9_backup_asm.S b/arch/arm/mach-at91/pm_sam9_backup_asm.S
+new file mode 100644
+index 0000000..899dc4f
+--- /dev/null
++++ b/arch/arm/mach-at91/pm_sam9_backup_asm.S
+@@ -0,0 +1,72 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++/*
++ * Backup sleep for the SAM9x5 family, in the style of the stock firmware:
++ * the SDRAM is put in self-refresh and the shutdown controller cuts VDDCORE.
++ * On wake the at91bootstrap in SPI flash jumps to at91_sam9_backup_resume
++ * (address in GPBR1) with the MMU and caches off.
++ */
++#include <linux/linkage.h>
++#include <asm/assembler.h>
++#include <asm/ptrace.h>
++
++#define GPBR_BASE		0xfffffe60
++#define GPBR2_OFF		0x08
++#define GPBR3_OFF		0x0c
++#define BACKUP_RESUMED		0x4D505701
++
++	.arm
++	.text
++
++/*
++ * Resume entry, physical addresses, MMU off. at91bootstrap only jumps here if
++ * the word right before GPBR1 holds 0x2bedf00d, so no padding is allowed
++ * between that word and the label. Mark GPBR3, clear the bootstrap's boot
++ * counter in GPBR2 (more than 3 means SAM-BA) and continue in cpu_resume.
++ */
++	.align	2
++	.word	0x2bedf00d
++	.globl	at91_sam9_backup_resume
++	.type	at91_sam9_backup_resume, %function
++at91_sam9_backup_resume:
++	ldr	r0, 1f
++	ldr	r1, 2f
++	str	r1, [r0, #GPBR3_OFF]
++	mov	r1, #0
++	str	r1, [r0, #GPBR2_OFF]
++	b	cpu_resume
++1:	.word	GPBR_BASE
++2:	.word	BACKUP_RESUMED
++	.size	at91_sam9_backup_resume, . - at91_sam9_backup_resume
++
++/*
++ * Runs from SRAM with the MMU on, interrupts must stay off.
++ *   r0 = DDRSDRC LPR (virtual), r1 = SHDW_CR (virtual)
++ * Same sequence and constants as the stock kernel. The registers are read
++ * first so that their TLB entries are loaded, and the constants are loaded
++ * into registers: a page table walk after self-refresh entry would read the
++ * SDRAM and take it out of self-refresh. Never returns; if the power is not
++ * cut, the watchdog resets the SoC.
++ */
++	.align	3
++ENTRY(at91_sam9_backup_sram)
++	mrs	ip, cpsr
++	orr	ip, ip, #(PSR_I_BIT | PSR_F_BIT)
++	msr	cpsr_c, ip		@ no IRQ/FIQ (ARMv5 has no cpsid)
++	ldr	r2, [r0]
++	ldr	r2, [r1]
++	ldr	r2, 3f
++	ldr	r3, 4f
++	mov	ip, #0
++	mcr	p15, 0, ip, c7, c10, 4	@ drain write buffer
++	ldr	ip, 5f
++	str	r2, [r0]		@ DDRSDRC LPR: self-refresh
++1:	subs	r3, r3, #1		@ about 1.5 ms at 382 MHz
++	bne	1b
++	str	ip, [r1]		@ SHDW_CR: key | SHDW
++2:	mcr	p15, 0, r2, c7, c0, 4	@ wait for interrupt
++	b	2b
++3:	.word	0x00300301		@ LPR: self-refresh, stock value
++4:	.word	200000
++5:	.word	0xa5000001
++ENTRY(at91_sam9_backup_sram_end)
++ENDPROC(at91_sam9_backup_sram)

@@ -1,0 +1,45 @@
+#!/bin/sh
+# Root-run wrapper for the USB Ethernet bridge, installed by tools/install-privileged.sh as
+# /usr/local/sbin/magpie-bridge (root-owned) and allowed in sudoers. It uses the system's
+# python3 + python3-usb and a root-owned copy of ecm_tap_bridge.py, so nothing the user
+# can edit runs as root.
+#   magpie-bridge start|stop|status
+set -eu
+BRIDGE=/usr/local/lib/magpie/ecm_tap_bridge.py
+PIDFILE=/run/magpie-bridge.pid
+LOG=/run/magpie-bridge.log
+
+# Also adopts a bridge started the old way (tools/bridge.sh before this was installed).
+running() {
+    if ! { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }; then
+        pid=$(pgrep -f '^[^ ]*/python[0-9.]* .*ecm_tap_bridge\.py' | head -1) || true
+        [ -n "$pid" ] || return 1
+        echo "$pid" > "$PIDFILE"
+    fi
+}
+
+case "${1:-}" in
+start)
+    if running; then echo "magpie-bridge: already running (pid $(cat "$PIDFILE"))"; exit 0; fi
+    : > "$LOG"; chmod 644 "$LOG"
+    setsid /usr/bin/python3 -I -B "$BRIDGE" > "$LOG" 2>&1 < /dev/null &
+    echo $! > "$PIDFILE"
+    echo "magpie-bridge: started (pid $!), log $LOG"
+    ;;
+stop)
+    if ! running; then echo "magpie-bridge: not running"; rm -f "$PIDFILE"; exit 0; fi
+    kill -INT "$(cat "$PIDFILE")"
+    i=0
+    while running && [ "$i" -lt 20 ]; do sleep 0.5; i=$((i + 1)); done
+    if running; then echo "magpie-bridge: still running" >&2; exit 1; fi
+    rm -f "$PIDFILE"
+    echo "magpie-bridge: stopped"
+    ;;
+status)
+    if running; then echo "magpie-bridge: running (pid $(cat "$PIDFILE"))"; else echo "magpie-bridge: not running"; fi
+    ;;
+*)
+    echo "usage: magpie-bridge start|stop|status" >&2
+    exit 2
+    ;;
+esac

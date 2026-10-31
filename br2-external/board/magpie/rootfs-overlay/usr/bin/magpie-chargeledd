@@ -1,0 +1,128 @@
+#!/bin/sh
+# magpie-chargeledd: charge-level LED indicator (same behaviour as the original firmware). Checks VBUS every second.
+# Unplugged: turns all LEDs off once on the transition, then touches nothing (magpie-lifelogd owns the LEDs).
+# Docked, not charging: all four LEDs on. Docked, charging: LEDs 1..level on, the top one blinks (1 s on, 1 s off).
+# No set -e: a failed read keeps the last state.
+set -u
+DEVMEM=${DEVMEM:-devmem}
+PIOC_PDSR=${PIOC_PDSR:-0xfffff83c}
+LED_CMD=${LED_CMD:-/usr/bin/magpie-led}
+BATTERY_CMD=${BATTERY_CMD:-/usr/bin/magpie-battery}
+CHARGE_CMD=${CHARGE_CMD:-/usr/bin/magpie-charge}
+SLEEP_CMD=${SLEEP_CMD:-sleep}
+CHARGE_EVERY=${CHARGE_EVERY:-10}  # seconds between magpie-charge reads
+BATT_EVERY=${BATT_EVERY:-5}       # seconds between magpie-battery reads
+
+# 0 = present, 1 = absent, 2 = unknown (devmem failed: keep the current state)
+vbus_state() {
+	v=$($DEVMEM "$PIOC_PDSR" 32 2> /dev/null)
+	case "$v" in 0x[0-9a-fA-F]* | [0-9]*) ;; *) return 2 ;; esac
+	[ $((v & 0x80000000)) -eq 0 ] && return 0
+	return 1
+}
+
+# set_leds MASK: MASK is 4 chars of 0/1; only LEDs that differ from the last applied mask are written
+MASK=0000
+set_leds() {
+	_new=$1
+	_i=1
+	while [ "$_i" -le 4 ]; do
+		_o=$(echo "$MASK" | cut -c"$_i")
+		_n=$(echo "$_new" | cut -c"$_i")
+		if [ "$_o" != "$_n" ]; then
+			if [ "$_n" = 1 ]; then $LED_CMD "$_i" on > /dev/null 2>&1; else $LED_CMD "$_i" off > /dev/null 2>&1; fi
+		fi
+		_i=$((_i + 1))
+	done
+	MASK=$_new
+}
+
+read_raw() {
+	$BATTERY_CMD 2> /dev/null | sed -n 's/^raw: *\([0-9][0-9]*\).*/\1/p' | head -n 1
+}
+
+# hysteresis as in the original firmware
+update_level() { # raw
+	_r=$1
+	[ "$_r" -lt 217 ] && LEVEL=1
+	[ "$_r" -lt 222 ] && [ "$LEVEL" -gt 2 ] && LEVEL=2
+	[ "$_r" -lt 232 ] && [ "$LEVEL" -gt 3 ] && LEVEL=3
+	[ "$_r" -gt 220 ] && LEVEL=2
+	[ "$_r" -gt 225 ] && LEVEL=3
+	[ "$_r" -gt 235 ] && LEVEL=4
+	return 0
+}
+
+level_mask() { # LEVEL, ON (top LED state)
+	case "$LEVEL" in
+	1) [ "$1" = 1 ] && echo 1000 || echo 0000 ;;
+	2) [ "$1" = 1 ] && echo 1100 || echo 1000 ;;
+	3) [ "$1" = 1 ] && echo 1110 || echo 1100 ;;
+	*) [ "$1" = 1 ] && echo 1111 || echo 1110 ;;
+	esac
+}
+
+main() {
+	docked=0     # at start the LEDs are assumed off (nothing is written until plugged in)
+	CHG=-1       # -1 unknown, 0 not charging, 1 charging
+	LEVEL=1
+	HAVE_RAW=0
+	tick=0
+	next_chg=0
+	next_bat=0
+	phase=1
+	loops=0
+	while :; do
+		vbus_state
+		case $? in
+		0)
+			if [ "$docked" = 0 ]; then
+				docked=1
+				MASK=????  # unknown: write everything that is needed
+				next_chg=$tick
+				next_bat=$tick
+				phase=1
+			fi
+			;;
+		1)
+			if [ "$docked" = 1 ]; then
+				docked=0
+				$LED_CMD all off > /dev/null 2>&1
+				MASK=0000
+			fi
+			;;
+		esac
+		if [ "$docked" = 1 ]; then
+			if [ "$tick" -ge "$next_chg" ]; then
+				next_chg=$((tick + CHARGE_EVERY))
+				_c=$($CHARGE_CMD 2> /dev/null)
+				case "$_c" in
+				"not charging"*) CHG=0 ;;
+				charging*) CHG=1 ;;
+				esac
+			fi
+			if [ "$CHG" = 0 ]; then
+				set_leds 1111
+			elif [ "$CHG" = 1 ]; then
+				if [ "$tick" -ge "$next_bat" ]; then
+					next_bat=$((tick + BATT_EVERY))
+					_raw=$(read_raw)
+					case "$_raw" in
+					'' | *[!0-9]*) ;;
+					*) update_level "$_raw"; HAVE_RAW=1 ;;
+					esac
+				fi
+				if [ "$HAVE_RAW" = 1 ]; then
+					set_leds "$(level_mask "$phase")"
+					phase=$((1 - phase))
+				fi
+			fi
+		fi
+		tick=$((tick + 1))
+		loops=$((loops + 1))
+		[ "${CHARGELED_MAX_LOOPS:-0}" -gt 0 ] && [ "$loops" -ge "${CHARGELED_MAX_LOOPS:-0}" ] && exit 0
+		$SLEEP_CMD 1
+	done
+}
+
+main

@@ -1,0 +1,22 @@
+#!/bin/sh
+# Writable tmpfs dirs, pstore and configfs. /data is mounted later, in the background (S40data).
+log() { echo "S02mounts: $*" > /dev/kmsg 2>/dev/null; }
+mounted() { mountpoint -q "$1"; }
+
+[ "$1" = start ] || exit 0
+log start
+
+mounted /proc || mount -t proc proc /proc
+mounted /sys || mount -t sysfs sysfs /sys
+log "tmpfs"
+mounted /tmp || mount -t tmpfs -o mode=1777 tmpfs /tmp
+mounted /run || mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs /run
+# /var/log, /var/tmp etc. are symlinks into /tmp or /run (see the Buildroot skeleton).
+mkdir -p /tmp/log /run/lock 2>/dev/null
+
+log "pstore"
+mounted /sys/fs/pstore || mount -t pstore pstore /sys/fs/pstore 2>/dev/null || log "pstore mount failed"
+log "configfs"
+mounted /sys/kernel/config || mount -t configfs configfs /sys/kernel/config 2>/dev/null || log "configfs mount failed"
+log done
+exit 0

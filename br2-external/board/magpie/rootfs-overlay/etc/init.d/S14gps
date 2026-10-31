@@ -1,0 +1,46 @@
+#!/bin/sh
+# Make the GPS chip's SPI node available to userspace: load spi-atmel and spidev in the background, bind
+# the generic spidev driver to the ACLYS device (spi1.1, "cellguide,aclys" in the DT) with driver_override
+# and log the resulting /dev/spidev* to the kernel log. Runs after S05healthy and S13camera, so a hang or
+# failure here can't delay the boot or the healthy marker. Always exits 0. Capture is done by gpsnap.
+log() { echo "S14gps: $*" > /dev/kmsg 2>/dev/null; }
+
+[ "$1" = start ] || exit 0
+log "start (background)"
+
+(
+	for m in spi-atmel spidev; do
+		if modprobe "$m" > /dev/null 2>&1; then
+			log "modprobe $m ok"
+		else
+			log "modprobe $m FAILED"
+		fi
+	done
+	# the device appears when spi-atmel probes the controller (async); give it a few seconds
+	dev=/sys/bus/spi/devices/spi1.1
+	i=0
+	while [ "$i" -lt 10 ] && [ ! -d "$dev" ]; do
+		sleep 1
+		i=$((i + 1))
+	done
+	if [ ! -d "$dev" ]; then
+		log "no spi1.1 after modprobe"
+	elif [ -e "$dev/driver" ]; then
+		log "spi1.1 already bound to $(basename "$(readlink "$dev/driver")")"
+	elif echo spidev > "$dev/driver_override" && echo spi1.1 > /sys/bus/spi/drivers/spidev/bind; then
+		log "spidev bound to spi1.1"
+	else
+		log "binding spidev to spi1.1 FAILED"
+	fi
+	i=0
+	while [ "$i" -lt 5 ] && ! ls /dev/spidev* > /dev/null 2>&1; do
+		sleep 1
+		i=$((i + 1))
+	done
+	if n=$(ls /dev/spidev* 2>/dev/null); then
+		log "spi nodes: $(echo $n)"
+	else
+		log "no /dev/spidev* after bind"
+	fi
+) > /dev/null 2>&1 &
+exit 0

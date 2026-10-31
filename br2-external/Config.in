@@ -1,0 +1,2 @@
+source "$BR2_EXTERNAL_MAGPIE_PATH/package/snap/Config.in"
+source "$BR2_EXTERNAL_MAGPIE_PATH/package/gpsnap/Config.in"

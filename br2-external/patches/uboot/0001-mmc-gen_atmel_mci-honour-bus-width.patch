@@ -1,0 +1,26 @@
+mmc: gen_atmel_mci: only offer 8-bit if the DT bus-width allows it
+
+The driver advertised MMC_MODE_8BIT on every MCI version >= 3.0. The
+SAM9x5 MCI0 interface has no DAT4-7 pins, so the eMMC 8-bit negotiation
+probes floating lines. Honour an optional "bus-width" property on the MCI
+node (default 8, i.e. unchanged for existing boards).
+
+diff --git a/drivers/mmc/gen_atmel_mci.c b/drivers/mmc/gen_atmel_mci.c
+--- a/drivers/mmc/gen_atmel_mci.c
++++ b/drivers/mmc/gen_atmel_mci.c
+@@ -541,8 +541,13 @@
+ 	 */
+ 	version = atmel_mci_get_version(plat->mci);
+ 	if ((version & 0xf00) >= 0x300) {
+-		cfg->host_caps = MMC_MODE_8BIT |
+-				 MMC_MODE_HS | MMC_MODE_HS_52MHz;
++		cfg->host_caps = MMC_MODE_HS | MMC_MODE_HS_52MHz;
++		/*
++		 * Only offer 8-bit if the board wires it up. Some boards
++		 * (SAM9x5) have no DAT4-7 pins on this interface.
++		 */
++		if (dev_read_u32_default(dev, "bus-width", 8) >= 8)
++			cfg->host_caps |= MMC_MODE_8BIT;
+ 	}
+ 
+ 	cfg->host_caps |= MMC_MODE_4BIT;

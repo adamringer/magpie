@@ -1,0 +1,35 @@
+#!/bin/sh
+# Start the lifelog daemon (magpie-lifelogd) in the background. Runs after S40data (which starts the /data
+# mount in the background; the daemon waits for it itself). Docked, the daemon does nothing; unplugged, it
+# takes a photo and powers off with an RTC alarm (docs/LIFELOG.md). Always exits 0.
+PID=/run/magpie-lifelogd.pid
+log() { echo "S50lifelog: $*" > /dev/kmsg 2>/dev/null; }
+
+running() { [ -f "$PID" ] && read -r p < "$PID" && [ -n "$p" ] && kill -0 "$p" 2>/dev/null; }
+
+case "$1" in
+start)
+	if running; then
+		log "already running"
+	elif [ -x /usr/bin/magpie-lifelogd ]; then
+		/usr/bin/magpie-lifelogd < /dev/null > /dev/null 2>&1 &
+		echo $! > "$PID"
+		log "started (pid $!)"
+	else
+		log "no /usr/bin/magpie-lifelogd"
+	fi
+	;;
+stop)
+	if running; then
+		read -r p < "$PID"
+		kill "$p" 2>/dev/null
+		rm -f "$PID"
+		log "stopped"
+	fi
+	;;
+restart)
+	"$0" stop
+	"$0" start
+	;;
+esac
+exit 0

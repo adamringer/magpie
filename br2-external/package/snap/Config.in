@@ -1,0 +1,6 @@
+config BR2_PACKAGE_SNAP
+	bool "snap"
+	help
+	  V4L2 still-capture tool for the Narrative Clip camera
+	  (Atmel ISI + OV5640). Depends only on libc and the kernel
+	  UAPI headers.

@@ -1,0 +1,22 @@
+[project]
+name = "magpie"
+version = "0.1.0"
+description = "Host-side tools for custom firmware on the Narrative Clip 1"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "numpy>=2.5.4",
+    "pillow>=13.0.0",
+    "pyserial>=3.5",
+    "pyusb>=1.3",
+]
+
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

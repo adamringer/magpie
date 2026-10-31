@@ -1,0 +1,8 @@
+#!/bin/sh
+echo "snap $*" >> "$STUB_STATE/calls"
+[ -f "$STUB_STATE/snap_fail" ] && { echo "snap: timeout" >&2; exit 3; }
+[ "$1" = -o ] || exit 1
+n=$(cat "$STUB_STATE/snap_size" 2>/dev/null || echo 120000)
+mkdir -p "$(dirname "$2")"
+head -c "$n" /dev/zero > "$2"
+echo "$2"

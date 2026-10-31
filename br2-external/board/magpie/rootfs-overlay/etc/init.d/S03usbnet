@@ -1,0 +1,49 @@
+#!/bin/sh
+# USB gadget via configfs: CDC-ECM only, usb0 = 192.168.2.2/24 (same VID/PID/host MAC as stock).
+log() { echo "S03usbnet: $*" > /dev/kmsg 2>/dev/null; }
+G=/sys/kernel/config/usb_gadget/magpie
+
+[ "$1" = start ] || exit 0
+log start
+ifconfig lo 127.0.0.1 up 2>/dev/null
+
+if [ ! -d /sys/kernel/config/usb_gadget ]; then
+	log "no usb_gadget in configfs"
+	exit 0
+fi
+
+mkdir -p "$G" || exit 0
+echo 0x0525 > "$G/idVendor"
+echo 0xa4a1 > "$G/idProduct"
+echo 0x0100 > "$G/bcdDevice"
+echo 0x0200 > "$G/bcdUSB"
+mkdir -p "$G/strings/0x409"
+echo "Magpie" > "$G/strings/0x409/manufacturer"
+echo "Magpie camera" > "$G/strings/0x409/product"
+echo "magpie0001" > "$G/strings/0x409/serialnumber"
+mkdir -p "$G/configs/c.1/strings/0x409"
+echo "ECM" > "$G/configs/c.1/strings/0x409/configuration"
+echo 250 > "$G/configs/c.1/MaxPower"
+mkdir -p "$G/functions/ecm.usb0"
+echo e6:11:22:33:44:55 > "$G/functions/ecm.usb0/host_addr"
+echo e6:11:22:33:44:56 > "$G/functions/ecm.usb0/dev_addr"
+ln -s "$G/functions/ecm.usb0" "$G/configs/c.1/ecm.usb0" 2>/dev/null
+
+# Wait up to 10 s for the UDC to appear, then bind.
+i=0
+udc=
+while [ "$i" -lt 10 ]; do
+	udc=$(ls /sys/class/udc 2>/dev/null | head -n 1)
+	[ -n "$udc" ] && break
+	sleep 1
+	i=$((i + 1))
+done
+if [ -z "$udc" ]; then
+	log "no UDC found"
+	exit 0
+fi
+echo "$udc" > "$G/UDC" || log "UDC bind failed"
+
+ifconfig usb0 192.168.2.2 netmask 255.255.255.0 up 2>/dev/null || log "usb0 setup failed"
+log "done (udc $udc)"
+exit 0

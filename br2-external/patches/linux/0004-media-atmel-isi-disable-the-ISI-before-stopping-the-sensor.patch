@@ -1,0 +1,43 @@
+media: atmel-isi: disable the ISI before stopping the sensor
+
+stop_streaming() turned the sensor's stream off first and then asked
+the ISI to disable itself. The ISI only completes a disable (or reset)
+while the sensor supplies a pixel clock, so every stream-off waited the
+full 500 ms and logged "Disable ISI timed out". Stop the sensor after
+the ISI has disabled.
+
+--- a/drivers/media/platform/atmel/atmel-isi.c
++++ b/drivers/media/platform/atmel/atmel-isi.c
+@@ -510,11 +510,6 @@
+ 	int ret = 0;
+ 	unsigned long timeout;
+ 
+-	/* Disable stream on the sub device */
+-	ret = v4l2_subdev_call(isi->entity.subdev, video, s_stream, 0);
+-	if (ret && ret != -ENOIOCTLCMD)
+-		dev_err(isi->dev, "stream off failed in subdev\n");
+-
+ 	spin_lock_irq(&isi->irqlock);
+ 	isi->active = NULL;
+ 	/* Release all active buffers */
+@@ -540,11 +535,19 @@
+ 	isi_writel(isi, ISI_INTDIS,
+ 			ISI_SR_CXFR_DONE | ISI_SR_PXFR_DONE);
+ 
+-	/* Disable ISI and wait for it is done */
++	/*
++	 * Disable ISI and wait for it is done. This needs the pixel clock, so
++	 * the sensor is stopped only afterwards.
++	 */
+ 	ret = atmel_isi_wait_status(isi, WAIT_ISI_DISABLE);
+ 	if (ret < 0)
+ 		dev_err(isi->dev, "Disable ISI timed out\n");
+ 
++	/* Disable stream on the sub device */
++	ret = v4l2_subdev_call(isi->entity.subdev, video, s_stream, 0);
++	if (ret && ret != -ENOIOCTLCMD)
++		dev_err(isi->dev, "stream off failed in subdev\n");
++
+ 	pm_runtime_put(isi->dev);
+ }
+ 

@@ -1,0 +1,8 @@
+#!/bin/sh
+# Take over the hardware watchdog from the kernel: a shell loop pings it every 5 s
+# (timeout 15 s). If the loop dies without a magic close, the board resets.
+# (BusyBox's watchdog daemon never pinged on this kernel: reset 16 s after it opened the device.)
+[ "$1" = start ] || exit 0
+echo "S30watchdog: start" > /dev/kmsg
+( while :; do echo k; sleep 5; done ) > /dev/watchdog 2>/dev/null &
+exit 0

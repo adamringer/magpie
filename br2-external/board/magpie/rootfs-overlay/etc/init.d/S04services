@@ -1,0 +1,8 @@
+#!/bin/sh
+# Telnet root shell (port 23, no login) and FTP (port 21), same as the stock dev mode.
+[ "$1" = start ] || exit 0
+echo "S04services: start" > /dev/kmsg
+telnetd -l /bin/sh
+tcpsvd -vE 0.0.0.0 21 ftpd -w / > /dev/null 2>&1 &
+echo "S04services: done" > /dev/kmsg
+exit 0

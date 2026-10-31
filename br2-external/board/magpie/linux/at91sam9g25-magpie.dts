@@ -1,0 +1,352 @@
+// SPDX-License-Identifier: GPL-2.0+
+/*
+ * Narrative Clip 1 (AT91SAM9G25), mainline Linux.
+ * Booted by the stock U-Boot with an appended DTB; U-Boot's ATAGs are ignored.
+ */
+/dts-v1/;
+#include "microchip/at91sam9g25.dtsi"
+#include "microchip/at91sam9x5_isi.dtsi"
+#include <dt-bindings/gpio/gpio.h>
+
+/ {
+	model = "Magpie camera (Narrative Clip 1 hardware)";
+	compatible = "magpie,cam1", "atmel,at91sam9g25", "atmel,at91sam9x5", "atmel,at91sam9";
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+	};
+
+	/* The dtsi has no spi aliases; without this the SPI core numbers the bus dynamically (0). */
+	aliases {
+		spi1 = &spi1;
+	};
+
+	/* 32 MB LPSDR */
+	memory@20000000 {
+		device_type = "memory";
+		reg = <0x20000000 0x2000000>;
+	};
+
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		/* Untouched by the stock U-Boot (loads at 0x20100000, 0x21800000+) */
+		ramoops@21000000 {
+			compatible = "ramoops";
+			reg = <0x21000000 0x80000>;
+			no-map;
+			console-size = <0x40000>;
+			record-size = <0x4000>;
+			ftrace-size = <0>;
+			pmsg-size = <0>;
+		};
+
+		/*
+		 * First RAM page, kept out of the kernel's use: at91bootstrap's SDRAM init
+		 * writes to 0x20000048 on every boot, including a warm wake, and the
+		 * fast-resume entry (0x2BEDF00D word + stub, tools/fastresume/) lives here.
+		 */
+		fastresume@20000000 {
+			reg = <0x20000000 0x1000>;
+			no-map;
+		};
+	};
+
+	/* LEDs d1-d4: PWM0-3 on PC18-PC21, active-low (stock gpio_led table) */
+	pwm-leds {
+		compatible = "pwm-leds";
+
+		led-d1 {
+			label = "magpie:d1";
+			pwms = <&pwm0 0 1000000 0>;
+			max-brightness = <255>;
+			active-low;
+		};
+
+		led-d2 {
+			label = "magpie:d2";
+			pwms = <&pwm0 1 1000000 0>;
+			max-brightness = <255>;
+			active-low;
+		};
+
+		led-d3 {
+			label = "magpie:d3";
+			pwms = <&pwm0 2 1000000 0>;
+			max-brightness = <255>;
+			active-low;
+		};
+
+		led-d4 {
+			label = "magpie:d4";
+			pwms = <&pwm0 3 1000000 0>;
+			max-brightness = <255>;
+			active-low;
+		};
+	};
+
+	/* Bit-banged I2C: SDA = PA30, SCL = PA31. Sensor IRQ lines unknown (polling). */
+	i2c-gpio0 {
+		compatible = "i2c-gpio";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&pinctrl_magpie_i2c_gpio>;
+		sda-gpios = <&pioA 30 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&pioA 31 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <5>;
+
+		accelerometer@18 {
+			compatible = "st,lis3dh-accel";
+			reg = <0x18>;
+		};
+
+		magnetometer@c {
+			compatible = "asahi-kasei,ak8963";
+			reg = <0x0c>;
+		};
+	};
+
+	/*
+	 * Camera sensor (OV5640, chip ID 0x5640) control bus: bit-banged SCCB on
+	 * SDA = PC8, SCL = PC9 (stock mmt_vid.ko does the same; the pull-ups are on in the PIO).
+	 * PC8-PC11 are ISI_D8-D11 on the chip but are used as GPIOs here, so only the
+	 * 8-bit ISI data pins (pinctrl_isi_data_0_7) are muxed to the ISI.
+	 */
+	i2c-gpio1 {
+		compatible = "i2c-gpio";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&pinctrl_magpie_sccb>;
+		sda-gpios = <&pioC 8 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&pioC 9 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <5>;
+
+		/*
+		 * No regulators on this board (supplies are fixed rails), and the
+		 * kernel has CONFIG_REGULATOR off, so the driver's supply lookups are stubs.
+		 * XCLK = PCK0 on PC15 (periph C). Stock runs it from MCK/8 (about 15.9 MHz);
+		 * the programmable clock only divides by powers of two, so ask prog0 for
+		 * "at most 16 MHz" (the ov5640 driver accepts 6-54 MHz).
+		 * PWDN = PC11 (high = powered down), RESET = PC10 (low = reset).
+		 */
+		ov5640: ov5640@3c {
+			compatible = "ovti,ov5640";
+			reg = <0x3c>;
+			pinctrl-names = "default";
+			pinctrl-0 = <&pinctrl_magpie_cam_xclk &pinctrl_magpie_cam_ctl>;
+			clocks = <&pmc PMC_TYPE_SYSTEM 8>;
+			clock-names = "xclk";
+			assigned-clocks = <&pmc PMC_TYPE_PROGRAMMABLE 0>;
+			assigned-clock-parents = <&pmc PMC_TYPE_CORE PMC_MCK>;
+			assigned-clock-rates = <16000000>;
+			powerdown-gpios = <&pioC 11 GPIO_ACTIVE_HIGH>;
+			reset-gpios = <&pioC 10 GPIO_ACTIVE_LOW>;
+
+			port {
+				/*
+				 * Polarities as the stock driver programs them: sensor reg 0x4740 = 0x21
+				 * (PCLK sample rising = bit5, VSYNC active low = bit0, HREF bit1 = 0),
+				 * ISI_CFG1 = 0x808 (VSYNC active low, HSYNC active high, PCLK rising).
+				 * hsync-active differs from the ISI endpoint on purpose (see docs/KERNEL.md, Camera).
+				 * Sensor D9:D2 go to ISI D7:D0.
+				 */
+				ov5640_to_isi: endpoint {
+					remote-endpoint = <&isi_from_ov5640>;
+					bus-width = <8>;
+					data-shift = <2>;
+					hsync-active = <0>;
+					vsync-active = <0>;
+					pclk-sample = <1>;
+				};
+			};
+		};
+	};
+
+	clocks {
+		slow_xtal {
+			clock-frequency = <32768>;
+		};
+
+		main_xtal {
+			clock-frequency = <12000000>;
+		};
+	};
+
+	ahb {
+		apb {
+			/* Clocksource/clockevent (the PIT driver is not built) */
+			tcb0: timer@f8008000 {
+				timer@0 {
+					compatible = "atmel,tcb-timer";
+					reg = <0>;
+				};
+
+				timer@1 {
+					compatible = "atmel,tcb-timer";
+					reg = <1>;
+				};
+			};
+
+			/* PB14 (battery divider enable) and PD15 (nCHRG) stay plain GPIOs for userspace. */
+			pinctrl@fffff400 {
+				magpie {
+					pinctrl_magpie_pwm: magpie_pwm {
+						atmel,pins =
+							<AT91_PIOC 18 AT91_PERIPH_C AT91_PINCTRL_NONE
+							 AT91_PIOC 19 AT91_PERIPH_C AT91_PINCTRL_NONE
+							 AT91_PIOC 20 AT91_PERIPH_C AT91_PINCTRL_NONE
+							 AT91_PIOC 21 AT91_PERIPH_C AT91_PINCTRL_NONE>;
+					};
+
+					pinctrl_magpie_i2c_gpio: magpie_i2c_gpio {
+						atmel,pins =
+							<AT91_PIOA 30 AT91_PERIPH_GPIO AT91_PINCTRL_MULTI_DRIVE
+							 AT91_PIOA 31 AT91_PERIPH_GPIO AT91_PINCTRL_MULTI_DRIVE>;
+					};
+
+					/* SCCB to the camera sensor, open-drain with pull-ups */
+					pinctrl_magpie_sccb: magpie_sccb {
+						atmel,pins =
+							<AT91_PIOC 8 AT91_PERIPH_GPIO (AT91_PINCTRL_PULL_UP | AT91_PINCTRL_MULTI_DRIVE)
+							 AT91_PIOC 9 AT91_PERIPH_GPIO (AT91_PINCTRL_PULL_UP | AT91_PINCTRL_MULTI_DRIVE)>;
+					};
+
+					/* Sensor XCLK: PCK0 on PC15 (peripheral C) */
+					pinctrl_magpie_cam_xclk: magpie_cam_xclk {
+						atmel,pins =
+							<AT91_PIOC 15 AT91_PERIPH_C AT91_PINCTRL_NONE>;
+					};
+
+					/* Sensor RESET (PC10) and PWDN (PC11) as plain GPIOs */
+					pinctrl_magpie_cam_ctl: magpie_cam_ctl {
+						atmel,pins =
+							<AT91_PIOC 10 AT91_PERIPH_GPIO AT91_PINCTRL_NONE
+							 AT91_PIOC 11 AT91_PERIPH_GPIO AT91_PINCTRL_NONE>;
+					};
+
+					/*
+					 * CellGuide ACLYS GPS control lines (stock aclys_gpio module):
+					 * PA1 = DATA READY, input, active low, glitch filter on (stock used
+					 * deglitch + falling-edge IRQ, one pulse per 4096-byte page),
+					 * PA6 = RESET (stock pulses 1-0-1), PA28 = LNA enable.
+					 * All plain GPIOs for userspace (gpsnap uses the GPIO character device).
+					 * PA0, the chip select, is claimed by the SPI core through cs-gpios.
+					 */
+					pinctrl_magpie_gps: magpie_gps {
+						atmel,pins =
+							<AT91_PIOA 1 AT91_PERIPH_GPIO AT91_PINCTRL_DEGLITCH
+							 AT91_PIOA 6 AT91_PERIPH_GPIO AT91_PINCTRL_NONE
+							 AT91_PIOA 28 AT91_PERIPH_GPIO AT91_PINCTRL_NONE>;
+					};
+
+					/* AD5 (PB16) resets as a GPIO input with pull-up, which would
+					 * skew the battery reading: plain input without pull. */
+					pinctrl_magpie_adc: magpie_adc {
+						atmel,pins =
+							<AT91_PIOB 16 AT91_PERIPH_GPIO AT91_PINCTRL_NONE>;
+					};
+				};
+			};
+
+			pwm0: pwm@f8034000 {
+				pinctrl-names = "default";
+				pinctrl-0 = <&pinctrl_magpie_pwm>;
+				status = "okay";
+			};
+
+			/* Battery on AD5 only (mask 0x20); 3.3 V reference */
+			adc0: adc@f804c000 {
+				atmel,adc-channels-used = <0x20>;
+				pinctrl-names = "default";
+				pinctrl-0 = <&pinctrl_magpie_adc>;
+				status = "okay";
+			};
+
+			dbgu: serial@fffff200 {
+				status = "okay";
+			};
+
+			/* eMMC. 4 data lines (PA15-PA20), no card-detect pin. */
+			mmc0: mmc@f0008000 {
+				pinctrl-0 = <
+					&pinctrl_mmc0_slot0_clk_cmd_dat0
+					&pinctrl_mmc0_slot0_dat1_3>;
+				bus-width = <4>;
+				status = "okay";
+				slot@0 {
+					reg = <0>;
+					bus-width = <4>;
+					non-removable;
+				};
+			};
+
+			/* UDPHS device port; no VBUS sense pin used. */
+			usb2: gadget@f803c000 {
+				status = "okay";
+			};
+
+			/* Already enabled by at91bootstrap; kernel keeps pinging it. */
+			watchdog@fffffe40 {
+				status = "okay";
+			};
+
+			rtc@fffffeb0 {
+				status = "okay";
+			};
+		};
+	};
+};
+
+/* 8-bit parallel camera input from the OV5640 (see the ov5640 node) */
+&isi {
+	status = "okay";
+
+	port {
+		isi_from_ov5640: endpoint@0 {
+			reg = <0>;
+			remote-endpoint = <&ov5640_to_isi>;
+			bus-width = <8>;
+			hsync-active = <1>;
+			vsync-active = <0>;
+			pclk-sample = <1>;
+		};
+	};
+};
+
+/*
+ * GPS: CellGuide ACLYS on SPI1 (MISO PA21, MOSI PA22, SPCK PA23, peripheral B).
+ * Chip select is PA0 driven as a GPIO (active low); the first entry is a placeholder
+ * for native NPCS0, so the chip is chip select 1 = /dev/spidev1.1 like on the stock
+ * firmware. The stock board table: bus 1, cs 1, 18.3 MHz max, mode 2 (CPOL=1, CPHA=0),
+ * 8 bits, MSB first.
+ * No driver exists for the chip. The node only describes the hardware; the S14gps init
+ * script binds the generic spidev driver to it via driver_override (spidev refuses a
+ * plain "spidev" compatible in DT, but binds anything through driver_override).
+ */
+&spi1 {
+	cs-gpios = <0>, <&pioA 0 GPIO_ACTIVE_LOW>;
+	pinctrl-0 = <&pinctrl_spi1 &pinctrl_magpie_gps>;
+	status = "okay";
+
+	gps@1 {
+		compatible = "cellguide,aclys";
+		reg = <1>;
+		spi-max-frequency = <18300000>;
+		spi-cpol;
+	};
+};
+
+/*
+ * Power-off wake sources, as the stock firmware set them (SHDW_MR 0x00020002):
+ * WKUP0 on a falling edge (the accelerometer's tap interrupt, INT1) and the RTC
+ * alarm. Mainline's "low" is WKMODE0 = 2, which the SAM9G25 datasheet defines as
+ * FALLING_EDGE, so this is exactly the stock setting.
+ */
+&shutdown_controller {
+	atmel,wakeup-mode = "low";
+	atmel,wakeup-rtc-timer;
+};

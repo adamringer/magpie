@@ -1,0 +1,11 @@
+#!/bin/sh
+# Load the peripheral modules (LEDs, PWM, ADC, I2C, sensors). Failures are logged and never block the boot.
+log() { echo "S12peripherals: $*" > /dev/kmsg 2>/dev/null; }
+
+[ "$1" = start ] || exit 0
+log start
+for m in pwm-atmel leds-pwm at91_adc i2c-gpio st_accel_i2c ak8975; do
+	modprobe "$m" > /dev/null 2>&1 || log "modprobe $m failed"
+done
+log done
+exit 0

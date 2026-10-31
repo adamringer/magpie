@@ -1,0 +1,23 @@
+usb: gadget: f_mass_storage: keep the idle count across sleep_thread calls
+
+sleep_thread() only checks for eject/Ctrl-C after 200000 idle loop
+iterations, and the counters were local, so every host command reset
+them. A host polling removable media every couple of seconds meant an
+eject was never noticed and ums never returned. Make the counters static.
+
+--- a/drivers/usb/gadget/f_mass_storage.c	2026-10-25 13:49:26.934521932 -0400
++++ b/drivers/usb/gadget/f_mass_storage.c	2026-10-25 13:49:26.961798880 -0400
+@@ -650,7 +650,12 @@
+ static int sleep_thread(struct fsg_common *common)
+ {
+ 	int	rc = 0;
+-	int i = 0, k = 0;
++	/*
++	 * Keep the idle count across calls. Hosts poll removable media every
++	 * few seconds (TEST UNIT READY), which used to reset the count before
++	 * it reached the eject/Ctrl-C check, so an eject was never acted on.
++	 */
++	static int i, k;
+ 
+ 	/* Wait until a signal arrives or we are woken up */
+ 	for (;;) {

@@ -1,0 +1,117 @@
+#!/bin/sh
+# magpie-accel <prep|sample|wake tap|tilt|none|dump>: drive the LIS3DH (i2c address 0x18) directly.
+#   prep    unload st_accel_i2c (it owns the chip), load i2c-dev, wait for the /dev/i2c-N node
+#   sample  enable measurement, print "xraw yraw zraw xmg ymg zmg" (signed 16-bit raw, milli-g = raw/16)
+#   wake M  apply the register blocks of mode M (tap, tilt, none) from the lifelog config, read every
+#           register back, log mismatches; exit 1 if any write or read-back failed
+#   dump    print registers 0x0f and 0x1e-0x3d (reading INT1_SRC/CLICK_SRC clears their flags)
+# Register values come from the ACCEL_* variables (magpie-lifelog.sh, /data/lifelog.conf).
+set -u
+LIFELOG_LIB=${LIFELOG_LIB:-/usr/lib/magpie-lifelog.sh}
+. "$LIFELOG_LIB" || exit 1
+LL_TAG=magpie-accel
+ll_load_conf
+
+bus=
+find_bus() {
+	for d in "$I2C_DEV_DIR"/*-00"${ACCEL_ADDR#0x}"; do
+		[ -e "$d" ] || continue
+		n=${d##*/}
+		bus=${n%%-*}
+		return 0
+	done
+	ll_log "no i2c device at $ACCEL_ADDR under $I2C_DEV_DIR"
+	return 1
+}
+
+rd() { # reg -> prints value
+	"$I2CGET" -y "$bus" "$ACCEL_ADDR" "$1" 2> /dev/null
+}
+
+# apply "REG=VAL ..." : write, read back, log mismatches. Sets bad=1 on any problem.
+apply() {
+	for pair in $1; do
+		r=${pair%%=*}
+		v=${pair#*=}
+		if ! "$I2CSET" -y "$bus" "$ACCEL_ADDR" "$r" "$v" > /dev/null 2>&1; then
+			ll_log "i2cset $r=$v failed"
+			bad=1
+			continue
+		fi
+		got=$(rd "$r")
+		case "$got" in
+		0x*) ;;
+		*)
+			ll_log "read back of $r failed"
+			bad=1
+			continue
+			;;
+		esac
+		if [ $((got)) -ne $((v)) ]; then
+			ll_log "MISMATCH reg $r: wrote $v, read $got"
+			bad=1
+		fi
+	done
+}
+
+s16() { # lo-reg hi-reg -> signed 16-bit
+	lo=$(rd "$1")
+	hi=$(rd "$2")
+	case "$lo$hi" in 0x*0x*) ;; *) return 1 ;; esac
+	val=$(((hi << 8) | lo))
+	[ "$val" -ge 32768 ] && val=$((val - 65536))
+	echo "$val"
+}
+
+case "${1:-}" in
+prep)
+	"$RMMOD_CMD" st_accel_i2c > /dev/null 2>&1 || ll_log "rmmod st_accel_i2c: not loaded or failed"
+	"$MODPROBE_CMD" i2c-dev > /dev/null 2>&1 || ll_log "modprobe i2c-dev failed (built in?)"
+	find_bus || exit 1
+	i=0
+	while [ "$i" -lt 5 ] && [ ! -e "$I2C_NODE_DIR/i2c-$bus" ]; do
+		"$SLEEP_CMD" 1
+		i=$((i + 1))
+	done
+	[ -e "$I2C_NODE_DIR/i2c-$bus" ] || { ll_log "no $I2C_NODE_DIR/i2c-$bus"; exit 1; }
+	;;
+sample)
+	find_bus || exit 1
+	bad=0
+	apply "$ACCEL_SAMPLE_REGS"
+	"$SLEEP_CMD" "$ACCEL_SETTLE"
+	x=$(s16 0x28 0x29) && y=$(s16 0x2a 0x2b) && z=$(s16 0x2c 0x2d) || { ll_log "reading outputs failed"; exit 1; }
+	echo "$x $y $z $((x / 16)) $((y / 16)) $((z / 16))"
+	[ "$bad" -eq 0 ] || exit 1
+	;;
+wake)
+	case "${2:-}" in
+	tap) blk=$ACCEL_TAP_REGS ;;
+	tilt) blk=$ACCEL_TILT_REGS ;;
+	none) blk=$ACCEL_NONE_REGS ;;
+	*) echo "usage: magpie-accel wake tap|tilt|none" >&2; exit 1 ;;
+	esac
+	find_bus || exit 1
+	bad=0
+	apply "$ACCEL_COMMON_REGS"
+	apply "$ACCEL_CLEAR_REGS"
+	apply "$blk"
+	# reading the source registers clears any flag that is still set
+	rd 0x31 > /dev/null
+	rd 0x39 > /dev/null
+	[ "$bad" -eq 0 ] && ll_log "wake mode ${2}: ok" || ll_log "wake mode ${2}: PROBLEMS (see above)"
+	exit "$bad"
+	;;
+dump)
+	find_bus || exit 1
+	for r in 0x0f 0x1e 0x1f 0x20 0x21 0x22 0x23 0x24 0x25 0x26 0x27 0x28 0x29 0x2a 0x2b 0x2c 0x2d \
+		0x2e 0x2f 0x30 0x31 0x32 0x33 0x34 0x35 0x36 0x37 0x38 0x39 0x3a 0x3b 0x3c 0x3d; do
+		echo "$r=$(rd "$r")"
+	done
+	;;
+*)
+	echo "usage: magpie-accel prep|sample|wake tap|tilt|none|dump" >&2
+	exit 1
+	;;
+esac
+exit 0

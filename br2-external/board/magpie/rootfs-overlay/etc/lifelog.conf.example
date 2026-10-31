@@ -1,0 +1,56 @@
+# Example /data/lifelog.conf for magpie-lifelogd. Copy it to /data/lifelog.conf and keep only the lines you want
+# to change; everything not listed uses the built-in default shown here. Format: KEY=VALUE, one per line, '#'
+# starts a comment, values are taken literally (quotes around them are removed, nothing is executed).
+# Unknown keys are ignored (and logged). The file is read once, when the daemon starts: reboot (or
+# /etc/init.d/S50lifelog restart) after editing.
+
+# --- schedule ---
+INTERVAL=30              # target seconds from one wake to the next (wake-to-wake)
+MIN_ALARM=8              # never arm the RTC for less than this many seconds
+BOOT_PREAMBLE=5          # seconds the bootloaders take before the kernel starts; alarm = INTERVAL - uptime - this
+VBUS_CHECKS=3            # unplugged 1 s checks in a row before a cycle starts (RTC/tap wakes start at once)
+
+# --- capture ---
+GPS=1                    # 1 = GPS snapshot (gpsnap) after each photo, same file stem, .snap
+GPS_ARGS=-a 1            # gpsnap arguments (-a 1 = LNA on); -o PATH is added
+BLINK=1                  # 1 = blink one LED per photo
+BLINK_LED=1              # which LED (1-4)
+BLINK_LEVEL=1            # 1 = blink LEDs 1..N for the battery level (2 >220, 3 >225, 4 >235); 0 = BLINK_LED only
+
+# --- battery (magpie-battery raw scale: full about 249) ---
+OFF_LEVEL=205            # below this: power off, only USB wakes it
+WARN_LEVEL=207           # at or below this: log a warning
+
+# --- smart skips (as the original firmware does) ---
+DARK_JPEG_BYTES=60000    # a photo smaller than this counts as dark; calibrate from log.csv (photo_bytes)
+DARK_AFTER=2             # more than this many dark photos in a row -> DARK_INTERVAL
+DARK_INTERVAL=120
+DARK_LONG_AFTER=10       # more than this many -> DARK_LONG_INTERVAL
+DARK_LONG_INTERVAL=480
+FACEDOWN_AXIS=z          # x, y or z: the axis that points at the ground when the camera lies face down.
+                         # Empty = detection off. Look at x_mg,y_mg,z_mg in log.csv with the camera face down.
+FACEDOWN_SIGN=-1         # -1 or 1: face down when SIGN * axis >= FACEDOWN_THRESHOLD
+FACEDOWN_THRESHOLD=800   # milli-g (1 g = 1000)
+FACEDOWN_OTHER_MAX=350   # the other two axes must each be below this (absolute, milli-g)
+FACEDOWN_INTERVAL=120    # seconds between photos while face down
+FACEDOWN_LONG_AFTER=10   # more than this many face-down cycles in a row -> FACEDOWN_LONG_INTERVAL
+FACEDOWN_LONG_INTERVAL=240
+
+# --- accelerometer wake after power-off (LIS3DH registers, REG=VALUE pairs applied in order) ---
+ACCEL_WAKE=none          # tap, tilt or none (USB always wakes it); none powers the accelerometer down
+ACCEL_COMMON_REGS=0x23=0x00 0x24=0x00 0x25=0x00
+ACCEL_CLEAR_REGS=0x21=0x00 0x22=0x00 0x30=0x00 0x38=0x00
+# double tap on Z: CTRL_REG2 (click high-pass), CTRL_REG4 (+-8 g), CLICK_THS (1.5 g, latched), TIME_LIMIT (30 ms),
+# TIME_LATENCY (100 ms), TIME_WINDOW (200 ms), CLICK_CFG (ZD), CTRL_REG3 (I1_CLICK), CTRL_REG1 (400 Hz, xyz)
+ACCEL_TAP_REGS=0x21=0x84 0x23=0x28 0x3A=0x98 0x3B=0x0C 0x3C=0x28 0x3D=0x50 0x38=0x20 0x22=0x80 0x20=0x77
+# tilt (verified to wake): INT1_THS, INT1_DURATION, INT1_CFG, CTRL_REG3 (I1_AOI1), CTRL_REG1
+ACCEL_TILT_REGS=0x32=0x20 0x33=0x05 0x30=0x20 0x22=0x40 0x20=0x57
+ACCEL_NONE_REGS=0x20=0x00
+
+# --- logging and timeouts ---
+LOG_MAX=1048576          # rotate log.csv and daemon.log (to .1) at this many bytes
+WAIT_TIMEOUT=15          # seconds to wait for /dev/video0 and /dev/spidev1.1
+DATA_WAIT=20             # seconds to wait for /data to mount
+SNAP_TIMEOUT=30
+GPSNAP_TIMEOUT=30
+NOALARM_RETRY=30         # when the RTC alarm can't be set, stay awake this long, then try another cycle

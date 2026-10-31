@@ -1,0 +1,64 @@
+// SPDX-License-Identifier: GPL-2.0+
+/*
+ * Narrative Clip 1 (AT91SAM9G25) device tree for the U-Boot "ums" restore
+ * image. Copied into arch/arm/dts/ by Buildroot (BR2_TARGET_UBOOT_CUSTOM_DTS_PATH).
+ *
+ * Only what the restore image uses is enabled: DBGU (no console is wired),
+ * MCI0 with the eMMC, the UDPHS gadget and the PIT. No SPI, NAND, Ethernet,
+ * LCD, watchdog or host USB.
+ */
+/dts-v1/;
+#include "at91sam9g25.dtsi"
+
+/ {
+	model = "Magpie camera (Narrative Clip 1 hardware, restore)";
+	compatible = "magpie,cam1", "atmel,at91sam9g25", "atmel,at91sam9x5", "atmel,at91sam9";
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+		bootph-all;
+	};
+
+	/* 32 MB LPSDR at 0x20000000; U-Boot sizes it itself (get_ram_size) */
+	memory {
+		reg = <0x20000000 0x2000000>;
+	};
+
+	clocks {
+		slow_xtal {
+			clock-frequency = <32768>;
+		};
+
+		main_xtal {
+			clock-frequency = <12000000>;
+		};
+	};
+
+	ahb {
+		apb {
+			dbgu: serial@fffff200 {
+				bootph-all;
+				status = "okay";
+			};
+
+			/* eMMC. 4 data lines (PA15-PA20), no card-detect pin. */
+			mmc0: mmc@f0008000 {
+				pinctrl-0 = <
+					&pinctrl_mmc0_slot0_clk_cmd_dat0
+					&pinctrl_mmc0_slot0_dat1_3>;
+				bus-width = <4>;
+				status = "okay";
+				slot@0 {
+					reg = <0>;
+					bus-width = <4>;
+					non-removable;
+				};
+			};
+
+			/* UDPHS device port; no VBUS sense pin used. */
+			usb2: gadget@f803c000 {
+				status = "okay";
+			};
+		};
+	};
+};

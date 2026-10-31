@@ -1,0 +1,34 @@
+#!/bin/sh
+# Start the charge LED daemon (magpie-chargeledd) in the background. Docked it shows the charge level on the LEDs;
+# unplugged it leaves them alone (docs/PERIPHERALS.md or LIFELOG.md). Runs after S50lifelog. Always exits 0.
+PID=/run/magpie-chargeledd.pid
+log() { echo "S51chargeled: $*" > /dev/kmsg 2>/dev/null; }
+
+running() { [ -f "$PID" ] && read -r p < "$PID" && [ -n "$p" ] && kill -0 "$p" 2>/dev/null; }
+
+case "$1" in
+start)
+	if running; then
+		log "already running"
+	elif [ -x /usr/bin/magpie-chargeledd ]; then
+		/usr/bin/magpie-chargeledd < /dev/null > /dev/null 2>&1 &
+		echo $! > "$PID"
+		log "started (pid $!)"
+	else
+		log "no /usr/bin/magpie-chargeledd"
+	fi
+	;;
+stop)
+	if running; then
+		read -r p < "$PID"
+		kill "$p" 2>/dev/null
+		rm -f "$PID"
+		log "stopped"
+	fi
+	;;
+restart)
+	"$0" stop
+	"$0" start
+	;;
+esac
+exit 0

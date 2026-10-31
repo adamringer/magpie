@@ -1,0 +1,4 @@
+#!/bin/sh
+[ -f "$STUB_STATE/battery" ] || exit 1
+echo "raw: $(cat "$STUB_STATE/battery")"
+echo "scale: 3.3 mV/LSB"

@@ -1,0 +1,121 @@
+From: magpie <noreply@example.invalid>
+Subject: [PATCH] media: atmel-isi: never leave a DMA channel armed
+
+If the ISI cannot be disabled (no pixel clock, e.g. a sensor that lost its
+setup across a backup sleep), stop_streaming() used to return with the ISI
+enabled and the codec DMA channel armed, after the buffers had already
+been given back to vb2. The next frame that arrives is then written to
+freed memory. Seen on the Clip after fast resumes: "Disable ISI timed out"
+with ISI_STATUS 0x1 and DMA_CHSR 0x2 after the snap had exited, and
+silent memory corruption.
+
+- Stop both DMA channels (ISI_DMA_CHDR, peripheral-clock domain, works
+  without a pixel clock) at the end of stop_streaming(), at the start of
+  start_streaming() and in its reset-timeout error path.
+- Keep the queued buffers on a private list until the DMA is stopped.
+- Warn when the codec DMA end address of a JPEG frame lies outside the
+  buffer (it used to be ignored silently).
+- Add system sleep ops (pm_runtime_force_suspend/resume).
+
+Signed-off-by: magpie <noreply@example.invalid>
+---
+--- a/drivers/media/platform/atmel/atmel-isi.c
++++ b/drivers/media/platform/atmel/atmel-isi.c
+@@ -209,6 +209,10 @@
+ 			if (end > start && end - start <= ISI_JPEG_SIZEIMAGE)
+ 				vb2_set_plane_payload(&vbuf->vb2_buf, 0,
+ 						      end - start);
++			else
++				dev_warn_ratelimited(isi->dev,
++					"DMA end 0x%08x outside buffer 0x%08x+0x%x\n",
++					end, (u32)start, ISI_JPEG_SIZEIMAGE);
+ 		}
+ 		vbuf->vb2_buf.timestamp = ktime_get_ns();
+ 		vbuf->sequence = isi->sequence++;
+@@ -239,6 +243,17 @@
+ 	return IRQ_HANDLED;
+ }
+ 
++/*
++ * Stop both DMA channels. The DMA registers are clocked by the peripheral
++ * clock, so this works even when the ISI cannot be disabled or reset for want
++ * of a pixel clock. An ISI left enabled with an armed channel writes the next
++ * frame that arrives to the old buffer address, which may be freed memory.
++ */
++static void isi_dma_stop(struct atmel_isi *isi)
++{
++	isi_writel(isi, ISI_DMA_CHDR, ISI_DMA_CHSR_C_CH | ISI_DMA_CHSR_P_CH);
++}
++
+ /* ISI interrupt service routine */
+ static irqreturn_t isi_interrupt(int irq, void *dev_id)
+ {
+@@ -458,6 +473,9 @@
+ 	if (ret < 0)
+ 		return ret;
+ 
++	/* A failed earlier stop may have left a channel armed: stop it first */
++	isi_dma_stop(isi);
++
+ 	/* Enable stream on the sub device */
+ 	ret = v4l2_subdev_call(isi->entity.subdev, video, s_stream, 1);
+ 	if (ret && ret != -ENOIOCTLCMD) {
+@@ -487,6 +505,7 @@
+ 	return 0;
+ 
+ err_reset:
++	isi_dma_stop(isi);
+ 	v4l2_subdev_call(isi->entity.subdev, video, s_stream, 0);
+ 
+ err_start_stream:
+@@ -509,16 +528,17 @@
+ {
+ 	struct atmel_isi *isi = vb2_get_drv_priv(vq);
+ 	struct frame_buffer *buf, *node;
++	LIST_HEAD(pending);
+ 	int ret = 0;
+ 	unsigned long timeout;
+ 
++	/*
++	 * Keep the buffers (on a private list) until the DMA is stopped: the
++	 * frame in progress is still written to the active one.
++	 */
+ 	spin_lock_irq(&isi->irqlock);
+ 	isi->active = NULL;
+-	/* Release all active buffers */
+-	list_for_each_entry_safe(buf, node, &isi->video_buffer_list, list) {
+-		list_del_init(&buf->list);
+-		vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_ERROR);
+-	}
++	list_splice_init(&isi->video_buffer_list, &pending);
+ 	spin_unlock_irq(&isi->irqlock);
+ 
+ 	if (!isi->enable_preview_path) {
+@@ -544,12 +564,19 @@
+ 	ret = atmel_isi_wait_status(isi, WAIT_ISI_DISABLE);
+ 	if (ret < 0)
+ 		dev_err(isi->dev, "Disable ISI timed out\n");
++	isi_dma_stop(isi);
+ 
+ 	/* Disable stream on the sub device */
+ 	ret = v4l2_subdev_call(isi->entity.subdev, video, s_stream, 0);
+ 	if (ret && ret != -ENOIOCTLCMD)
+ 		dev_err(isi->dev, "stream off failed in subdev\n");
+ 
++	/* The hardware is quiet now: give the buffers back */
++	list_for_each_entry_safe(buf, node, &pending, list) {
++		list_del_init(&buf->list);
++		vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_ERROR);
++	}
++
+ 	pm_runtime_put(isi->dev);
+ }
+ 
+@@ -1407,6 +1434,7 @@
+ #endif /* CONFIG_PM */
+ 
+ static const struct dev_pm_ops atmel_isi_dev_pm_ops = {
++	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend, pm_runtime_force_resume)
+ 	SET_RUNTIME_PM_OPS(atmel_isi_runtime_suspend,
+ 				atmel_isi_runtime_resume, NULL)
+ };

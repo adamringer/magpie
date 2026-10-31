@@ -1,0 +1,32 @@
+From: magpie <noreply@example.invalid>
+Subject: [PATCH] media: ov5640: power down for system sleep
+
+The driver only has runtime PM ops (with a 1 s autosuspend). A system
+sleep that cuts the core power (the sam9x5 backup sleep) also resets the
+PIOs that hold the sensor in power-down and reset, so the sensor can lose
+its registers while runtime PM still counts it as powered and configured.
+After such a resume the sensor sends no frames, the ISI reset or disable
+times out, and the ISI is left enabled with an armed DMA channel. Use
+pm_runtime_force_suspend/resume as system sleep ops so the sensor is
+powered down before the sleep and set up from scratch on its next use.
+
+Signed-off-by: magpie <noreply@example.invalid>
+---
+--- a/drivers/media/i2c/ov5640.c
++++ b/drivers/media/i2c/ov5640.c
+@@ -4008,6 +4008,15 @@
+ }
+ 
+ static const struct dev_pm_ops ov5640_pm_ops = {
++	/*
++	 * A system sleep can cut the power of the SoC (sam9x5 backup mode) and
++	 * with it the GPIOs that hold the sensor in power-down/reset, so the
++	 * sensor can lose its registers while runtime PM still counts it as
++	 * powered and configured (the 1 s autosuspend often has not run yet).
++	 * Power it down properly before the sleep; the next use powers it up
++	 * and restores the mode from scratch.
++	 */
++	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend, pm_runtime_force_resume)
+ 	SET_RUNTIME_PM_OPS(ov5640_sensor_suspend, ov5640_sensor_resume, NULL)
+ };
+ 

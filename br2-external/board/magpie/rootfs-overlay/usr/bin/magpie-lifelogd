@@ -381,11 +381,8 @@ run_cycle() {
 		stem=$PHOTO_DIR/$(date '+%Y%m%d-%H%M%S')
 		photo=$stem.jpg
 		if [ -e "$VIDEO_NODE" ]; then
-			# The camera needs ~6 MiB of contiguous CMA. Page cache from earlier cycles (photos, GPS
-			# snapshots, logs) settles in the CMA area and, after hours of uptime with fast resume,
-			# left too little for VIDIOC_REQBUFS. Write it back and drop it first.
-			sync
-			echo 3 > "$DROP_CACHES" 2> /dev/null
+			# No page-cache drop here: it forced eMMC page-ins while the camera streams, which after a
+			# fast resume fail (backlog). snap needs 2 x 2 MiB of CMA (12 MiB area) and mlocks itself.
 			run_logged "snap" with_timeout "$SNAP_TIMEOUT" $SNAP_CMD -o "$photo" && photo_ok=1
 			photo_bytes=$(wc -c < "$photo" 2> /dev/null)
 			case "$photo_bytes" in '' | *[!0-9]*) photo_bytes=0 ;; esac

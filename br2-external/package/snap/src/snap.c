@@ -28,7 +28,9 @@
 
 #define ISI_DRIVER "atmel-isi"
 #define PHOTO_DIR "/data/photos"
-#define MAX_BUFS 3
+/* Two is the ISI's minimum (min_queued_buffers) and keeps the contiguous (CMA) need at 2 x 2 MiB for a
+ * 5 MP JPEG; snap keeps only one frame after the skipped ones, so a third buffer gains nothing. */
+#define MAX_BUFS 2
 #define FRAME_TIMEOUT_S 5
 /* OV5640 JPEG framing set by the magpie kernel patch: fixed lines, 2-byte length header */
 #define JPEG_LINE 1024
@@ -606,6 +608,10 @@ int main(int argc, char **argv)
 		snprintf(outpath, sizeof(outpath), PHOTO_DIR "/%s.%s", ts, ext);
 	}
 
+	/* Lock our pages before streaming: a page-in from the eMMC while the ISI streams can fail after a
+	 * fast resume (see the magpie status backlog). Not fatal if refused. */
+	if (mlockall(MCL_CURRENT | MCL_FUTURE) < 0)
+		VLOG("mlockall: %s\n", strerror(errno));
 	rc = capture(cap.fd, w, h, fourcc, fmtname, skip, outpath, outarg == NULL);
 	cleanup();
 	return rc;

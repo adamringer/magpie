@@ -61,7 +61,6 @@
 : "${DEVMEM:=devmem}"
 : "${BATTERY_CMD:=magpie-battery}"
 : "${SNAP_CMD:=snap}"
-: "${DROP_CACHES:=/proc/sys/vm/drop_caches}" # written before each photo (tests point it elsewhere)
 : "${GPSNAP_CMD:=gpsnap}"
 : "${LED_CMD:=magpie-led}"
 : "${ACCEL_CMD:=magpie-accel}"

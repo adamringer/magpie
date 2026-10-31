@@ -74,8 +74,11 @@ def test_scripts_parse():
 
 def test_docked_full_all_on(env):
     env.put("charge", "not charging\n")
-    calls = env.run()
-    assert leds(calls) == ["1 on", "2 on", "3 on", "4 on"]
+    calls = leds(env.run())
+    assert calls[:4] == ["1 on", "2 on", "3 on", "4 on"]
+    # alive heartbeat: the top LED is off for one second in four, nothing else changes
+    assert set(calls[4:]) <= {"4 off", "4 on"} and "4 off" in calls[4:]
+    assert calls[4:6] == ["4 off", "4 on"]
 
 
 @pytest.mark.parametrize("raw,level", [(210, 1), (221, 2), (226, 3), (240, 4)])
@@ -121,7 +124,8 @@ def test_plug_after_unplug(env):
 def test_plug_unplug_plug(env):
     env.put("charge", "not charging\n")
     calls = leds(env.run(vbus="present\nabsent\nabsent\npresent\n", CHARGELED_MAX_LOOPS="8"))
-    assert calls == ["1 on", "2 on", "3 on", "4 on", "all off", "1 on", "2 on", "3 on", "4 on"]
+    # replugged on tick 3, a heartbeat tick: the top LED starts off for that second; tick 7 is the next one
+    assert calls == ["1 on", "2 on", "3 on", "4 on", "all off", "1 on", "2 on", "3 on", "4 off", "4 on", "4 off"]
 
 
 def test_poll_rates(env):

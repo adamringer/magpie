@@ -1,7 +1,8 @@
 #!/bin/sh
 # magpie-chargeledd: charge-level LED indicator (same behaviour as the original firmware). Checks VBUS every second.
 # Unplugged: turns all LEDs off once on the transition, then touches nothing (magpie-lifelogd owns the LEDs).
-# Docked, not charging: all four LEDs on. Docked, charging: LEDs 1..level on, the top one blinks (1 s on, 1 s off).
+# Docked, not charging (full): all four LEDs on, the top one off for one second in four as an "alive" heartbeat.
+# Docked, charging: LEDs 1..level on, the top one blinks (1 s on, 1 s off).
 # No set -e: a failed read keeps the last state.
 set -u
 DEVMEM=${DEVMEM:-devmem}
@@ -102,7 +103,7 @@ main() {
 				esac
 			fi
 			if [ "$CHG" = 0 ]; then
-				set_leds 1111
+				if [ $((tick % 4)) -eq 3 ]; then set_leds 1110; else set_leds 1111; fi
 			elif [ "$CHG" = 1 ]; then
 				if [ "$tick" -ge "$next_bat" ]; then
 					next_bat=$((tick + BATT_EVERY))

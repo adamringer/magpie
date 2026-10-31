@@ -140,10 +140,11 @@ CONFIG_VIDEO_ATMEL_ISI=m
 CONFIG_VIDEO_OV5640=m
 # The sensor sits on a second bit-banged bus on PC8/PC9 (CONFIG_I2C_GPIO=m above)
 # CMA: the ISI needs physically contiguous buffers (about 2 MiB per full-size JPEG frame,
-# about 3 buffers) and 32 MB RAM fragments quickly. Built in so the area is reserved at boot.
+# about 3 buffers) and 32 MB RAM fragments quickly. 12 MB since 2026-10-31: page cache borrows the
+# area and, after hours of fast-resume uptime, 8 MB left too little (VIDIOC_REQBUFS: Out of memory). Built in so the area is reserved at boot.
 CONFIG_CMA=y
 CONFIG_DMA_CMA=y
-CONFIG_CMA_SIZE_MBYTES=6
+CONFIG_CMA_SIZE_MBYTES=12
 
 # --- Explicitly off (otherwise pulled in by defaults) ---
 # CONFIG_NET_RX_BUSY_POLL is not set

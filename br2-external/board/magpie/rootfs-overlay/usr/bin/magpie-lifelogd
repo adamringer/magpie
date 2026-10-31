@@ -20,6 +20,7 @@ RESUME_LOADED=0
 PENDING_FAIL=  # GPBR3 marker found at start, counted once /data is readable
 UDC_NAME=      # gadget UDC name remembered while the gadget is unbound for a sleep
 GADGET_UNBOUND=0
+PHOTO_FAILS=0 # failed photos in a row in this boot (2 force the next sleep to be a cold boot)
 
 # ---- VBUS ----
 # 0 = present, 1 = absent, 2 = unknown (devmem failed: treated like docked, never powers off)
@@ -184,6 +185,13 @@ want_resume() {
 	[ "$SLEEP_MODE" = resume ] || return 1
 	if [ "$RESUME_FAILS" -ge "$RESUME_MAX_FAIL" ]; then
 		ll_log "fast resume disabled after $RESUME_FAILS failures: powering off"
+		return 1
+	fi
+	if [ "$PHOTO_FAILS" -ge 2 ]; then
+		PHOTO_FAILS=0
+		SLEEP_COUNT=0
+		save_resume_state
+		ll_log "photo failed twice in a row: cold boot"
 		return 1
 	fi
 	if [ "$COLD_EVERY" -gt 0 ] && [ $((SLEEP_COUNT + 1)) -ge "$COLD_EVERY" ]; then
@@ -373,6 +381,11 @@ run_cycle() {
 		stem=$PHOTO_DIR/$(date '+%Y%m%d-%H%M%S')
 		photo=$stem.jpg
 		if [ -e "$VIDEO_NODE" ]; then
+			# The camera needs ~6 MiB of contiguous CMA. Page cache from earlier cycles (photos, GPS
+			# snapshots, logs) settles in the CMA area and, after hours of uptime with fast resume,
+			# left too little for VIDIOC_REQBUFS. Write it back and drop it first.
+			sync
+			echo 3 > "$DROP_CACHES" 2> /dev/null
 			run_logged "snap" with_timeout "$SNAP_TIMEOUT" $SNAP_CMD -o "$photo" && photo_ok=1
 			photo_bytes=$(wc -c < "$photo" 2> /dev/null)
 			case "$photo_bytes" in '' | *[!0-9]*) photo_bytes=0 ;; esac
@@ -380,8 +393,10 @@ run_cycle() {
 			if [ "$photo_ok" = 1 ]; then
 				blink
 				[ "$photo_bytes" -lt "$DARK_JPEG_BYTES" ] && dark=1
+				PHOTO_FAILS=0
 			else
-				ll_log "photo failed"
+				PHOTO_FAILS=$((PHOTO_FAILS + 1))
+				ll_log "photo failed ($PHOTO_FAILS in a row)"
 			fi
 		fi
 		if [ "$GPS" = 1 ] && [ -e "$SPI_NODE" ]; then

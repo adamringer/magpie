@@ -58,6 +58,7 @@ class Env:
             POWEROFF_FALLBACK="",
             SLEEP_MODE="poweroff",  # the old tests assume one cycle, then power off; the resume tests override this
             PM_STATE=str(self.s / "pm_state"),
+            DROP_CACHES=str(self.s / "drop_caches"),
             UDC_FILE=str(self.s / "UDC"),
             TIMEOUT_CMD="",
             SLEEP_CMD="true",
@@ -520,6 +521,19 @@ def test_resume_loops_between_cycles(env):
     assert udc(env) == ""
     assert resume_file(env) == {"resume_fail": "0", "sleep_count": "3"}
 
+
+
+def test_two_failed_photos_force_a_cold_boot(env):
+    resume_env(env, loops=9)
+    env.put("snap_fail", "")
+    env.run()
+    rows = env.csv_rows()
+    assert [r["photo_ok"] for r in rows] == ["0", "0"]
+    assert [r["end"] for r in rows] == ["sleep", "poweroff"]
+    assert len(env.called("poweroff")) == 1
+    assert "photo failed twice in a row: cold boot" in env.daemon_log()
+    # the page cache is dropped before each photo
+    assert (env.s / "drop_caches").read_text().strip() == "3"
 
 def test_resume_wake_source_from_shdw_sr(env):
     resume_env(env, dmesg="at91-backup: resumed, SHDW_SR=0x00000001\n", loops=4)

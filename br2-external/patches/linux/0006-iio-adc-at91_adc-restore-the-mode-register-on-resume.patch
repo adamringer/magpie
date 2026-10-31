@@ -1,0 +1,41 @@
+From: magpie <noreply@example.invalid>
+Subject: [PATCH] iio: adc: at91_adc: restore the mode register on resume
+
+A sleep mode that cuts the core power (the sam9x5 backup sleep) resets
+the ADC, and resume only re-enabled the clock, so every conversion read
+0 afterwards. Keep the mode register value computed at probe and write
+it back on resume.
+
+Signed-off-by: magpie <noreply@example.invalid>
+---
+--- a/drivers/iio/adc/at91_adc.c
++++ b/drivers/iio/adc/at91_adc.c
+@@ -226,6 +226,7 @@
+ 	void __iomem		*reg_base;
+ 	const struct at91_adc_reg_desc *registers;
+ 	u32			startup_time;
++	u32			mr;	/* mode register as set up at probe */
+ 	u8			sample_hold_time;
+ 	bool			sleep_mode;
+ 	struct iio_trigger	**trig;
+@@ -1126,6 +1127,7 @@
+ 	if (st->sleep_mode)
+ 		reg |= AT91_ADC_SLEEP;
+ 	reg |= AT91_ADC_SHTIM_(shtim) & AT91_ADC_SHTIM;
++	st->mr = reg;
+ 	at91_adc_writel(st, AT91_ADC_MR, reg);
+ 
+ 	/* Setup the ADC channels available on the board */
+@@ -1212,6 +1214,12 @@
+ 
+ 	clk_prepare_enable(st->clk);
+ 	pinctrl_pm_select_default_state(dev);
++	/*
++	 * A sleep that cuts the core power (backup mode) resets the ADC, so
++	 * program the mode register again; after a plain suspend this rewrites
++	 * the same value.
++	 */
++	at91_adc_writel(st, AT91_ADC_MR, st->mr);
+ 
+ 	return 0;
+ }

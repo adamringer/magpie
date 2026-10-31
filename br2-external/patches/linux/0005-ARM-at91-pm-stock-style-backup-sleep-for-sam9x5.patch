@@ -7,10 +7,13 @@ shutdown controller and, on wake, let the at91bootstrap in SPI flash jump
 to a resume entry (GPBR0 magic, GPBR1 = entry, 0x2bedf00d before it) that
 continues in cpu_resume.
 
-Only the CPU context is restored; AIC, PIO and PMC are not. GPBR1 (also
-the boot progress marker) is saved and restored around the sleep, GPBR2
-(bootstrap boot counter) and GPBR0 are cleared afterwards, and GPBR3
-carries progress markers. Enabled by CONFIG_AT91_SAM9_BACKUP_SLEEP.
+The core power cut also wipes PMC, AIC and PIO, so their registers are
+saved right before cpu_suspend() and restored right after it returns (PMC
+first, then AIC, then PIO), before the PM core resumes anything else.
+GPBR1 (also the boot progress marker) is saved and restored around the
+sleep, GPBR2 (bootstrap boot counter) and GPBR0 are cleared afterwards,
+and GPBR3 carries progress markers. Enabled by
+CONFIG_AT91_SAM9_BACKUP_SLEEP.
 
 Signed-off-by: magpie <noreply@example.invalid>
 ---
@@ -18,7 +21,7 @@ diff --git a/arch/arm/mach-at91/Kconfig b/arch/arm/mach-at91/Kconfig
 index c5ef27e..6f74e07 100644
 --- a/arch/arm/mach-at91/Kconfig
 +++ b/arch/arm/mach-at91/Kconfig
-@@ -249,6 +249,16 @@ config SOC_SAMA5
+@@ -249,6 +249,17 @@ config SOC_SAMA5
  config ATMEL_PM
  	bool
  
@@ -29,8 +32,9 @@ index c5ef27e..6f74e07 100644
 +	  Make "mem" suspend put the SDRAM in self-refresh and cut the core
 +	  power through the shutdown controller. Needs an at91bootstrap that
 +	  jumps to the address in GPBR1 when GPBR0 holds 0xCAFEBABE and the
-+	  word before it is 0x2BEDF00D. Peripheral state (AIC, PIO, PMC) is
-+	  not restored yet. Say n unless your board has such a bootstrap.
++	  word before it is 0x2BEDF00D. The PMC, AIC and PIO registers are
++	  saved before the sleep and restored after it. Say n unless your
++	  board has such a bootstrap.
 +
  config ATMEL_SECURE_PM
  	bool "Atmel Secure PM support"
@@ -102,10 +106,10 @@ index 35058b9..c8d0648 100644
  void __init sama5_pm_init(void)
 diff --git a/arch/arm/mach-at91/pm_sam9_backup.c b/arch/arm/mach-at91/pm_sam9_backup.c
 new file mode 100644
-index 0000000..6fa5ad0
+index 0000000..1207a11
 --- /dev/null
 +++ b/arch/arm/mach-at91/pm_sam9_backup.c
-@@ -0,0 +1,154 @@
+@@ -0,0 +1,458 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +/*
 + * Backup sleep for the SAM9x5 family, as the stock firmware did it.
@@ -118,12 +122,22 @@ index 0000000..6fa5ad0
 + * counts boots in GPBR2 and falls back to SAM-BA above 3, so GPBR2 is cleared
 + * before the power cut and again on resume.
 + *
-+ * Only the CPU context is restored here; AIC, PIO and PMC state is not.
++ * The core power cut also wipes the PMC, AIC and PIO registers (the bootstrap
++ * only brings the clocks and the SDRAM back, like on a cold boot). They are
++ * saved right before cpu_suspend() and restored right after it returns, with
++ * interrupts still off and before the PM core resumes anything else, which
++ * puts the restore ahead of syscore_resume, timekeeping and the device resume
++ * callbacks. The order is PMC, AIC, PIO: peripheral clocks must run before
++ * the PIO banks (and later the timer) are touched, and the AIC must be back
++ * before anything can raise an interrupt.
++ *
 + * GPBR3 gets progress markers that survive a reset.
 + */
 +#include <linux/errno.h>
 +#include <linux/genalloc.h>
 +#include <linux/io.h>
++#include <linux/iopoll.h>
++#include <linux/kernel.h>
 +#include <linux/of.h>
 +#include <linux/of_platform.h>
 +#include <linux/platform_device.h>
@@ -153,6 +167,99 @@ index 0000000..6fa5ad0
 +
 +#define MARK_SUSPENDING		0x4D505700
 +#define MARK_BACK_IN_C		0x4D505702
++#define MARK_HW_RESTORED	0x4D505703
++
++#define PMC_PHYS		0xfffffc00
++#define AIC_PHYS		0xfffff000
++#define PIO_PHYS(bank)		(0xfffff400 + (bank) * 0x200)
++#define NR_PIO			4
++
++/* PMC */
++#define PMC_SCER		0x00
++#define PMC_SCDR		0x04
++#define PMC_SCSR		0x08
++#define PMC_PCER		0x10
++#define PMC_PCDR		0x14
++#define PMC_PCSR		0x18
++#define CKGR_UCKR		0x1c
++#define PMC_USB			0x38
++#define PMC_PCK(n)		(0x40 + (n) * 4)
++#define PMC_SR			0x68
++#define PMC_WPMR		0xe4
++#define PMC_SR_LOCKU		BIT(6)
++#define PMC_SR_PCKRDY(n)	BIT(8 + (n))
++#define CKGR_UCKR_UPLLEN	BIT(16)
++/* UDP, UHP, SMDCK, PCK0, PCK1: never DDRCK (SDRAM clock) or PCK (CPU clock) */
++#define PMC_SYSCLK_MASK		(BIT(7) | BIT(6) | BIT(4) | BIT(9) | BIT(8))
++/* Peripheral IDs 0 and 1 (FIQ, SYS) have no clock bit */
++#define PMC_PCLK_MASK		0xfffffffc
++/* PIOA/PIOB are ID 2, PIOC/PIOD are ID 3 */
++#define PMC_PCLK_PIO		(BIT(2) | BIT(3))
++
++/* AIC */
++#define AIC_SMR(n)		(0x00 + (n) * 4)
++#define AIC_SVR(n)		(0x80 + (n) * 4)
++#define AIC_IMR			0x110
++#define AIC_IECR		0x120
++#define AIC_IDCR		0x124
++#define AIC_ICCR		0x128
++#define AIC_EOICR		0x130
++#define AIC_SPU			0x134
++#define AIC_DCR			0x138
++#define AIC_FFER		0x140
++#define AIC_FFSR		0x148
++#define AIC_WPMR		0x1e4
++#define AIC_NR_IRQ		32
++
++/* PIO */
++#define PIO_PER			0x00
++#define PIO_PDR			0x04
++#define PIO_PSR			0x08
++#define PIO_OER			0x10
++#define PIO_ODR			0x14
++#define PIO_OSR			0x18
++#define PIO_IFER		0x20
++#define PIO_IFDR		0x24
++#define PIO_IFSR		0x28
++#define PIO_SODR		0x30
++#define PIO_CODR		0x34
++#define PIO_ODSR		0x38
++#define PIO_IER			0x40
++#define PIO_IDR			0x44
++#define PIO_IMR			0x48
++#define PIO_ISR			0x4c
++#define PIO_MDER		0x50
++#define PIO_MDDR		0x54
++#define PIO_MDSR		0x58
++#define PIO_PUDR		0x60
++#define PIO_PUER		0x64
++#define PIO_PUSR		0x68
++#define PIO_ABCDSR1		0x70
++#define PIO_ABCDSR2		0x74
++#define PIO_IFSCDR		0x80
++#define PIO_IFSCER		0x84
++#define PIO_IFSCSR		0x88
++#define PIO_SCDR		0x8c
++#define PIO_PPDDR		0x90
++#define PIO_PPDER		0x94
++#define PIO_PPDSR		0x98
++#define PIO_OWER		0xa0
++#define PIO_OWDR		0xa4
++#define PIO_OWSR		0xa8
++#define PIO_AIMER		0xb0
++#define PIO_AIMDR		0xb4
++#define PIO_AIMMR		0xb8
++#define PIO_ESR			0xc0
++#define PIO_LSR			0xc4
++#define PIO_ELSR		0xc8
++#define PIO_FELLSR		0xd0
++#define PIO_REHLSR		0xd4
++#define PIO_FRLHSR		0xd8
++#define PIO_WPMR		0xe4
++#define PIO_SCHMITT		0x100
++#define PIO_DELAYR		0x110
++#define PIO_DRIVER1		0x114
++#define PIO_DRIVER2		0x118
 +
 +extern void at91_sam9_backup_resume(void);
 +extern void at91_sam9_backup_sram(void __iomem *lpr, void __iomem *shdw_cr);
@@ -161,6 +268,189 @@ index 0000000..6fa5ad0
 +static void (*sram_fn)(void __iomem *, void __iomem *);
 +static size_t sram_sz;
 +static void __iomem *lpr, *shdwc, *bsc_cr, *gpbr, *rtc_sccr;
++static void __iomem *pmc, *aic, *pio[NR_PIO];
++
++/*
++ * One PIO state register and the pair of registers that rebuild it: every
++ * 1 bit of the saved value is written to @set, every 0 bit to @clr. Registers
++ * that are plain read/write have @clr == 0 and @set == @save. Note that the
++ * pull-up and pull-down status registers read 1 for "disabled", so their
++ * @set is the disable register.
++ *
++ * The order is the order of the restore and matters:
++ *  - output data (and its write-enable) before the output enable, so that a
++ *    pin does not drive the reset level when it becomes an output;
++ *  - multi-drive, pull-up/down, filters and drive strength before the pin is
++ *    handed to its function;
++ *  - the A/B/C/D function select while the pin is still under PIO control;
++ *  - output enable, then the interrupt modes, then the interrupt mask, with
++ *    the status read in between to drop what the mode changes latched;
++ *  - PER/PDR last, which is what actually connects a pin to its peripheral.
++ */
++struct pio_item {
++	u16 save, set, clr;
++};
++
++static const struct pio_item pio_items[] = {
++	{ PIO_OWSR,    PIO_OWER,    PIO_OWDR },
++	{ PIO_ODSR,    PIO_SODR,    PIO_CODR },
++	{ PIO_MDSR,    PIO_MDER,    PIO_MDDR },
++	{ PIO_PUSR,    PIO_PUDR,    PIO_PUER },
++	{ PIO_PPDSR,   PIO_PPDDR,   PIO_PPDER },
++	{ PIO_IFSR,    PIO_IFER,    PIO_IFDR },
++	{ PIO_IFSCSR,  PIO_IFSCER,  PIO_IFSCDR },
++	{ PIO_SCDR,    PIO_SCDR },
++	{ PIO_SCHMITT, PIO_SCHMITT },
++	{ PIO_DELAYR,  PIO_DELAYR },
++	{ PIO_DRIVER1, PIO_DRIVER1 },
++	{ PIO_DRIVER2, PIO_DRIVER2 },
++	{ PIO_ABCDSR1, PIO_ABCDSR1 },
++	{ PIO_ABCDSR2, PIO_ABCDSR2 },
++	{ PIO_OSR,     PIO_OER,     PIO_ODR },
++	{ PIO_AIMMR,   PIO_AIMER,   PIO_AIMDR },
++	{ PIO_ELSR,    PIO_LSR,     PIO_ESR },	/* 1 = level */
++	{ PIO_FRLHSR,  PIO_REHLSR,  PIO_FELLSR },	/* 1 = rising/high */
++	{ PIO_IMR,     PIO_IER,     PIO_IDR },
++	{ PIO_PSR,     PIO_PER,     PIO_PDR },	/* 1 = PIO controls the pin */
++};
++#define PIO_ISR_BEFORE		(ARRAY_SIZE(pio_items) - 2)	/* the IMR entry */
++
++static struct {
++	u32 scsr, pcsr, uckr, usb, pck[2];
++} pmc_ctx;
++
++static struct {
++	u32 smr[AIC_NR_IRQ], svr[AIC_NR_IRQ];
++	u32 imr, spu, dcr, ffsr;
++} aic_ctx;
++
++static u32 pio_ctx[NR_PIO][ARRAY_SIZE(pio_items)];
++
++static void hw_save(void)
++{
++	int i, b;
++
++	if ((readl(pmc + PMC_WPMR) | readl(aic + AIC_WPMR) |
++	     readl(pio[0] + PIO_WPMR)) & 1)
++		pr_warn("at91-backup: write protection is on, restore may be incomplete\n");
++
++	pmc_ctx.scsr = readl(pmc + PMC_SCSR);
++	pmc_ctx.pcsr = readl(pmc + PMC_PCSR);
++	pmc_ctx.uckr = readl(pmc + CKGR_UCKR);
++	pmc_ctx.usb = readl(pmc + PMC_USB);
++	pmc_ctx.pck[0] = readl(pmc + PMC_PCK(0));
++	pmc_ctx.pck[1] = readl(pmc + PMC_PCK(1));
++
++	for (i = 0; i < AIC_NR_IRQ; i++) {
++		aic_ctx.smr[i] = readl(aic + AIC_SMR(i));
++		aic_ctx.svr[i] = readl(aic + AIC_SVR(i));
++	}
++	aic_ctx.imr = readl(aic + AIC_IMR);
++	aic_ctx.spu = readl(aic + AIC_SPU);
++	aic_ctx.dcr = readl(aic + AIC_DCR);
++	aic_ctx.ffsr = readl(aic + AIC_FFSR);
++
++	/* The PIO banks may be clock gated (pinctrl does it when idle) */
++	writel(PMC_PCLK_PIO, pmc + PMC_PCER);
++	for (b = 0; b < NR_PIO; b++)
++		for (i = 0; i < ARRAY_SIZE(pio_items); i++)
++			pio_ctx[b][i] = readl(pio[b] + pio_items[i].save);
++	writel(~pmc_ctx.pcsr & PMC_PCLK_PIO, pmc + PMC_PCDR);
++}
++
++static void pmc_wait(u32 mask, const char *what)
++{
++	u32 sr;
++
++	if (readl_poll_timeout_atomic(pmc + PMC_SR, sr, (sr & mask) == mask,
++				      1, 20000))
++		pr_warn("at91-backup: %s not ready (PMC_SR=0x%08x)\n", what, sr);
++}
++
++static void pmc_restore(void)
++{
++	u32 sc = pmc_ctx.scsr & PMC_SYSCLK_MASK;
++	u32 pc = pmc_ctx.pcsr & PMC_PCLK_MASK;
++	int i;
++
++	/*
++	 * PLLA and the master clock are already as before (the bootstrap sets
++	 * them up like on a cold boot). The UTMI PLL goes first because the USB
++	 * clock and the USB system clocks depend on it.
++	 */
++	writel(pmc_ctx.uckr, pmc + CKGR_UCKR);
++	if (pmc_ctx.uckr & CKGR_UCKR_UPLLEN)
++		pmc_wait(PMC_SR_LOCKU, "UTMI PLL lock");
++	writel(pmc_ctx.usb, pmc + PMC_USB);
++
++	/* A programmable clock is configured while it is stopped, then started */
++	for (i = 0; i < 2; i++)
++		writel(pmc_ctx.pck[i], pmc + PMC_PCK(i));
++	writel(sc, pmc + PMC_SCER);
++	writel(~sc & PMC_SYSCLK_MASK, pmc + PMC_SCDR);
++	for (i = 0; i < 2; i++)
++		if (sc & BIT(8 + i))
++			pmc_wait(PMC_SR_PCKRDY(i), "programmable clock");
++
++	/* The PIO banks need their clock to be written, see pio_restore() */
++	writel(pc | PMC_PCLK_PIO, pmc + PMC_PCER);
++	writel(~pc & PMC_PCLK_MASK & ~PMC_PCLK_PIO, pmc + PMC_PCDR);
++}
++
++static void aic_restore(void)
++{
++	int i;
++
++	/*
++	 * Same start as aic_hw_init(): end of interrupt x8 so that the AIC is
++	 * not locked out, everything disabled and cleared. Then the vectors and
++	 * the source modes, and only then the mask, so that nothing fires with
++	 * reset-state priorities.
++	 */
++	for (i = 0; i < 8; i++)
++		writel(0, aic + AIC_EOICR);
++	writel(~0, aic + AIC_IDCR);
++	writel(~0, aic + AIC_ICCR);
++	writel(aic_ctx.spu, aic + AIC_SPU);
++	writel(aic_ctx.dcr, aic + AIC_DCR);
++	for (i = 0; i < AIC_NR_IRQ; i++)
++		writel(aic_ctx.svr[i], aic + AIC_SVR(i));
++	for (i = 0; i < AIC_NR_IRQ; i++)
++		writel(aic_ctx.smr[i], aic + AIC_SMR(i));
++	if (aic_ctx.ffsr)
++		writel(aic_ctx.ffsr, aic + AIC_FFER);
++	writel(aic_ctx.imr, aic + AIC_IECR);
++}
++
++static void pio_restore(void)
++{
++	int i, b;
++
++	for (b = 0; b < NR_PIO; b++) {
++		void __iomem *base = pio[b];
++
++		for (i = 0; i < ARRAY_SIZE(pio_items); i++) {
++			const struct pio_item *it = &pio_items[i];
++			u32 v = pio_ctx[b][i];
++
++			if (i == PIO_ISR_BEFORE)
++				readl(base + PIO_ISR);	/* clears latched status */
++			writel(v, base + it->set);
++			if (it->clr)
++				writel(~v, base + it->clr);
++		}
++	}
++
++	/* Put back the clock gating the PIO banks had before the sleep */
++	writel(~pmc_ctx.pcsr & PMC_PCLK_PIO, pmc + PMC_PCDR);
++}
++
++static void hw_restore(void)
++{
++	pmc_restore();
++	aic_restore();
++	pio_restore();
++}
 +
 +static int at91_sam9_backup_finish(unsigned long val)
 +{
@@ -190,13 +480,21 @@ index 0000000..6fa5ad0
 +	writel(RTC_SCCR_ALL, rtc_sccr);
 +	writel(BOOT_MAGIC, gpbr + GPBR0);
 +
++	hw_save();
 +	flush_cache_all();
 +	ret = cpu_suspend(0, at91_sam9_backup_finish);
++
++	/* A hang in the restore shows as GPBR3 = MARK_BACK_IN_C */
++	writel(MARK_BACK_IN_C, gpbr + GPBR3);
++	if (!ret) {
++		/* Power was cut: nothing else may run before this is done */
++		hw_restore();
++		writel(MARK_HW_RESTORED, gpbr + GPBR3);
++	}
 +
 +	writel(0, gpbr + GPBR0);
 +	writel(0, gpbr + GPBR2);
 +	writel(saved_gpbr1, gpbr + GPBR1);
-+	writel(MARK_BACK_IN_C, gpbr + GPBR3);
 +
 +	/* The SRAM content is lost with the core power */
 +	sram_fn = fncpy(sram_fn, &at91_sam9_backup_sram, sram_sz);
@@ -215,7 +513,9 @@ index 0000000..6fa5ad0
 +	struct platform_device *pdev = NULL;
 +	struct gen_pool *pool;
 +	dma_addr_t phys;
++	bool fail = false;
 +	void *sram;
++	int i;
 +
 +	sram_sz = at91_sam9_backup_sram_end - (char *)at91_sam9_backup_sram;
 +
@@ -245,7 +545,15 @@ index 0000000..6fa5ad0
 +	bsc_cr = ioremap(BSC_CR_PHYS, 4);
 +	gpbr = ioremap(GPBR_PHYS, 0x10);
 +	rtc_sccr = ioremap(RTC_SCCR_PHYS, 4);
-+	if (!lpr || !shdwc || !bsc_cr || !gpbr || !rtc_sccr) {
++	pmc = ioremap(PMC_PHYS, 0x100);
++	aic = ioremap(AIC_PHYS, 0x200);
++	for (i = 0; i < NR_PIO; i++) {
++		pio[i] = ioremap(PIO_PHYS(i), 0x200);
++		if (!pio[i])
++			fail = true;
++	}
++	if (fail || !pmc || !aic || !lpr || !shdwc || !bsc_cr || !gpbr ||
++	    !rtc_sccr) {
 +		pr_warn("at91-backup: register mapping failed\n");
 +		goto out;
 +	}

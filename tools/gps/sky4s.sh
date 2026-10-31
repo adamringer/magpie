@@ -10,6 +10,8 @@
 # Only one instance runs (lock dir). Start it detached; it survives the telnet session and USB unplug:
 #   start-stop-daemon -S -b -x /data/sky4s.sh -- 10 30 120
 COUNT=${1:-10}; PERIOD=${2:-30}; DELAY=${3:-60}
+# optional 4th argument: gpsnap -w warm-up values (ms) to cycle through, e.g. "0,1000" for an A/B test
+WARMUPS=$(echo "${4:-0}" | tr ',' ' ')
 # a newer gpsnap test build in /data wins (writes the PATH.time capture timestamp)
 GPSNAP=gpsnap; [ -x /data/gpsnap.new ] && GPSNAP=/data/gpsnap.new
 OUT=/data/gps/sky4s; mkdir -p "$OUT"; LOG=$OUT/log.txt
@@ -28,10 +30,12 @@ sleep "$DELAY"
 i=1
 while [ "$i" -le "$COUNT" ]; do
 	t0=$(date +%s)
+	set -- $WARMUPS; n=$#; k=$(( (i - 1) % n + 1 )); eval "w=\${$k}"
+	wopt=""; [ "$w" != 0 ] && wopt="-w $w"   # an older gpsnap without -w still works for 0
 	for try in 1 2; do
 		f=$OUT/$(date -u +%Y%m%d-%H%M%S).snap
-		led 'magpie:d1' 255; $GPSNAP -s 4096 -a 1 -v -o "$f" >> "$OUT/gpsnap.out" 2>&1; rc=$?; led 'magpie:d1' 0
-		echo "$(date -u '+%F %T') $i $f rc=$rc try=$try" >> "$LOG"; sync
+		led 'magpie:d1' 255; $GPSNAP -s 4096 -a 1 $wopt -v -o "$f" >> "$OUT/gpsnap.out" 2>&1; rc=$?; led 'magpie:d1' 0
+		echo "$(date -u '+%F %T') $i $f rc=$rc try=$try warmup=$w" >> "$LOG"; sync
 		[ "$rc" = 3 ] || break
 	done
 	i=$((i + 1))

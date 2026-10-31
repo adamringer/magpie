@@ -1,2 +1,4 @@
 #!/bin/sh
+# STUB_DMESG_LOG=1: also record the gadget binding and GPBR3 at the time of the call (the daemon calls dmesg right after a resume)
+[ -n "${STUB_DMESG_LOG:-}" ] && echo "dmesg udc=$(cat "$UDC_FILE" 2>/dev/null) gpbr3=$(cat "$STUB_STATE/gpbr3" 2>/dev/null)" >> "$STUB_STATE/calls"
 cat "$STUB_STATE/dmesg" 2>/dev/null

@@ -32,6 +32,9 @@
 : "${GPSNAP_TIMEOUT:=30}"
 : "${GPS_ARGS:=-a 1}"            # arguments for gpsnap (-o PATH is added)
 : "${NOALARM_RETRY:=30}"         # seconds to stay awake before retrying when the RTC alarm cannot be set
+: "${SLEEP_MODE:=resume}"        # resume = sleep with fast resume between cycles; poweroff = power off after every cycle
+: "${COLD_EVERY:=70}"            # resume mode: every Nth sleep is a real power-off + RTC wake (cold boot); 0 = never
+: "${RESUME_MAX_FAIL:=3}"        # failed fast resumes (cold boot with GPBR3 markers) before every sleep is a power-off, until USB is plugged in
 # Accelerometer (LIS3DH, address 0x18) register blocks: "REG=VALUE" pairs, applied in order, each read back.
 : "${ACCEL_WAKE:=none}"          # tap, tilt or none: what wakes it after the power-off (USB plug always does);
                                 # none powers the accelerometer down (off for now, user 2026-10-31)
@@ -77,7 +80,10 @@
 : "${PIOC_PDSR:=0xfffff83c}"     # PIOC pin data status; bit 31 = PC31 = VBUS, active low
 : "${GPBR1:=0xfffffe64}"
 : "${GPBR2:=0xfffffe68}"
+: "${GPBR3:=0xfffffe6c}"          # kernel fast-resume markers 0x4D5057xx (0 after power-on)
 : "${HEALTHY_MARK:=0x4D500020}"
+: "${UDC_FILE:=/sys/kernel/config/usb_gadget/magpie/UDC}"   # USB gadget binding: empty string = unbound
+: "${PM_STATE:=/sys/power/state}"                          # echo mem = fast-resume sleep
 
 ll_now() { date '+%Y-%m-%d %H:%M:%S'; }
 
@@ -158,13 +164,18 @@ ll_load_conf() {
 		DARK_JPEG_BYTES:60000 DARK_AFTER:2 DARK_INTERVAL:120 DARK_LONG_AFTER:10 DARK_LONG_INTERVAL:480 \
 		FACEDOWN_SIGN:-1 FACEDOWN_THRESHOLD:800 FACEDOWN_OTHER_MAX:350 FACEDOWN_INTERVAL:120 \
 		FACEDOWN_LONG_AFTER:10 FACEDOWN_LONG_INTERVAL:240 LOG_MAX:1048576 WAIT_TIMEOUT:15 DATA_WAIT:20 \
-		SNAP_TIMEOUT:30 GPSNAP_TIMEOUT:30 NOALARM_RETRY:30 GPS:1 BLINK:1 BLINK_LED:1 BLINK_LEVEL:1; do
+		SNAP_TIMEOUT:30 GPSNAP_TIMEOUT:30 NOALARM_RETRY:30 COLD_EVERY:70 RESUME_MAX_FAIL:3 GPS:1 BLINK:1 BLINK_LED:1 BLINK_LEVEL:1; do
 		ll_int "${_p%%:*}" "${_p#*:}"
 	done
 	[ "$VBUS_CHECKS" -ge 1 ] || VBUS_CHECKS=1
 	case "$FACEDOWN_AXIS" in '' | x | y | z) ;; *)
 		ll_log "config: FACEDOWN_AXIS='$FACEDOWN_AXIS' must be x, y or z; face-down detection off"
 		FACEDOWN_AXIS=
+		;;
+	esac
+	case "$SLEEP_MODE" in resume | poweroff) ;; *)
+		ll_log "config: SLEEP_MODE='$SLEEP_MODE' must be resume or poweroff; using resume"
+		SLEEP_MODE=resume
 		;;
 	esac
 	case "$ACCEL_WAKE" in tap | tilt | none) ;; *)

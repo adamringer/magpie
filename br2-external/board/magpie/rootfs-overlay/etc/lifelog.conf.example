@@ -10,6 +10,11 @@ MIN_ALARM=8              # never arm the RTC for less than this many seconds
 BOOT_PREAMBLE=5          # seconds the bootloaders take before the kernel starts; alarm = INTERVAL - uptime - this
 VBUS_CHECKS=3            # unplugged 1 s checks in a row before a cycle starts (RTC/tap wakes start at once)
 
+# --- sleep between cycles ---
+SLEEP_MODE=resume        # resume = fast-resume sleep (echo mem) between cycles, same boot; poweroff = power off + RTC wake
+COLD_EVERY=70            # resume mode: every Nth sleep is a real power-off + RTC wake (cold boot); 0 = never
+RESUME_MAX_FAIL=3        # failed resumes (cold boot after a started sleep) before every sleep is a power-off, until USB is plugged in
+
 # --- capture ---
 GPS=1                    # 1 = GPS snapshot (gpsnap) after each photo, same file stem, .snap
 GPS_ARGS=-a 1            # gpsnap arguments (-a 1 = LNA on); -o PATH is added

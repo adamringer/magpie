@@ -35,6 +35,7 @@ class Env:
         (self.s / "video0").write_text("")
         (self.s / "spidev").write_text("")
         (self.s / "calls").write_text("")
+        (self.s / "UDC").write_text("udc.0\n")
         self.env = dict(
             os.environ,
             STUB_STATE=str(self.s),
@@ -55,6 +56,9 @@ class Env:
             MOUNTPOINT_CMD=str(STUBS / "mountpoint"),
             POWEROFF_CMD=str(STUBS / "poweroff") + " -f",
             POWEROFF_FALLBACK="",
+            SLEEP_MODE="poweroff",  # the old tests assume one cycle, then power off; the resume tests override this
+            PM_STATE=str(self.s / "pm_state"),
+            UDC_FILE=str(self.s / "UDC"),
             TIMEOUT_CMD="",
             SLEEP_CMD="true",
             LIFELOG_MAX_LOOPS="12",
@@ -449,3 +453,187 @@ def test_blink_single_led_when_level_off(env):
     env.run()
     on = [c for c in env.calls if c.startswith("magpie-led") and c.endswith(" on")]
     assert on == ["magpie-led 3 on"]
+
+
+# ---- fast-resume sleep (SLEEP_MODE=resume) ----
+
+RESUMED_RTC = "[ 5.0] at91-backup: resumed, SHDW_SR=0x00020000\n"
+
+
+def resume_env(env, conf="", dmesg=RESUMED_RTC, vbus="absent\n", loops=5):
+    env.env["SLEEP_MODE"] = "resume"
+    env.env["STUB_DMESG_LOG"] = "1"
+    env.env["LIFELOG_MAX_LOOPS"] = str(loops)
+    env.put("dmesg", dmesg)
+    env.put("vbus.seq", vbus)
+    if conf:
+        env.conf(conf)
+
+
+def udc(env):
+    return (env.s / "UDC").read_text().strip()
+
+
+def resume_file(env):
+    return dict(ln.split("=") for ln in (env.data / "lifelog" / "resume").read_text().split())
+
+
+def test_defaults_are_resume():
+    env = {k: v for k, v in os.environ.items() if k not in ("SLEEP_MODE", "COLD_EVERY", "RESUME_MAX_FAIL")}
+    r = subprocess.run(["sh", "-c", f". {LIB}; echo $SLEEP_MODE $COLD_EVERY $RESUME_MAX_FAIL"], env=env,
+                       capture_output=True, text=True)
+    assert r.stdout.split() == ["resume", "70", "3"]
+
+
+def test_bad_sleep_mode_falls_back(env):
+    env.env["SLEEP_MODE"] = "nap"
+    env.env["LIFELOG_MAX_LOOPS"] = "1"
+    env.run()
+    assert "SLEEP_MODE='nap' must be resume or poweroff" in env.daemon_log()
+
+
+def test_poweroff_mode_never_sleeps(env):
+    env.env["STUB_DMESG_LOG"] = "1"
+    env.run()
+    assert poweroff_alarm(env) == "+15"
+    assert not (env.s / "pm_state").exists()
+    assert udc(env) == "udc.0"
+    assert env.csv_rows()[0]["end"] == "poweroff"
+
+
+def test_resume_loops_between_cycles(env):
+    resume_env(env)
+    env.run()
+    assert not env.called("poweroff")
+    assert (env.s / "pm_state").read_text().strip() == "mem"
+    rows = env.csv_rows()
+    assert [r["end"] for r in rows] == ["sleep"] * 3
+    assert [r["wake"] for r in rows] == ["none", "RTC", "RTC"]
+    # first cycle: alarm as after a cold boot; later ones count from the resume, with no bootloader time
+    assert [r["alarm_s"] for r in rows] == ["15", "30", "30"]
+    assert [r["up_start_s"] for r in rows] == ["10", "0", "0"]
+    assert len(env.called("snap -o ")) == 3
+    # GPBR3 cleared before each sleep; the gadget was unbound when the system woke and is not rebound (not docked)
+    assert env.calls.count("devmem write 0xfffffe6c 0") == 3
+    after = [c for c in env.calls if c.startswith("dmesg ")]
+    assert after[1:] == ["dmesg udc= gpbr3=0"] * 3  # [0] is the start-up wake-source lookup
+    assert udc(env) == ""
+    assert resume_file(env) == {"resume_fail": "0", "sleep_count": "3"}
+
+
+def test_resume_wake_source_from_shdw_sr(env):
+    resume_env(env, dmesg="at91-backup: resumed, SHDW_SR=0x00000001\n", loops=4)
+    env.run()
+    assert [r["wake"] for r in env.csv_rows()] == ["none", "unknown"]
+
+
+def test_every_cold_every_th_sleep_powers_off(env):
+    resume_env(env, "COLD_EVERY=3\n", loops=9)
+    env.run()
+    assert [r["end"] for r in env.csv_rows()] == ["sleep", "sleep", "poweroff"]
+    assert len(env.called("poweroff")) == 1
+    assert env.calls.count("devmem write 0xfffffe6c 0") == 2
+    assert resume_file(env)["sleep_count"] == "0"
+    assert "cold boot" in env.daemon_log()
+
+
+def test_cold_every_zero_never_powers_off(env):
+    resume_env(env, "COLD_EVERY=0\n", loops=12)
+    env.run()
+    assert not env.called("poweroff")
+    assert len(env.csv_rows()) == 10
+
+
+def test_sleep_count_survives_cold_boot(env):
+    resume_env(env, "COLD_EVERY=3\n", loops=3)
+    env.state()
+    (env.data / "lifelog" / "resume").write_text("resume_fail=0\nsleep_count=2\n")
+    env.run()
+    assert len(env.called("poweroff")) == 1
+    assert env.calls.count("devmem write 0xfffffe6c 0") == 0
+
+
+def test_echo_mem_failure_powers_off_and_rebinds(env):
+    resume_env(env, loops=3)
+    (env.s / "pm_state").mkdir()  # writing fails
+    env.run()
+    assert poweroff_alarm(env) == "+15"
+    assert udc(env) == "udc.0"
+    assert "echo mem" in env.daemon_log() and "failed" in env.daemon_log()
+
+
+def test_vbus_after_resume_rebinds_and_docks(env):
+    # 3 debounce checks, the check inside the cycle, then present right after the resume
+    resume_env(env, vbus="absent\nabsent\nabsent\nabsent\npresent\n", loops=7)
+    env.run()
+    assert not env.called("poweroff")
+    assert len(env.csv_rows()) == 1
+    assert udc(env) == "udc.0"
+    assert "VBUS present after resume" in env.daemon_log()
+    assert len(env.called("snap -o ")) == 1  # docked: no more photos
+
+
+def test_docked_during_awake_period_rebinds_gadget(env):
+    # cycle 1 sleeps; the plug-in is noticed by the main loop later
+    resume_env(env, vbus="absent\nabsent\nabsent\nabsent\nabsent\npresent\n", loops=7)
+    env.run()
+    assert udc(env) == "udc.0"
+    assert len(env.called("snap -o ")) == 1
+
+
+def test_gpbr3_marker_counts_failure(env):
+    resume_env(env, loops=1)
+    env.put("gpbr3", "0x4D505703\n")
+    env.run()
+    assert "fast resume failed (GPBR3=0x4D505703)" in env.daemon_log()
+    assert env.calls.count("devmem write 0xfffffe6c 0") == 1
+    assert resume_file(env)["resume_fail"] == "1"
+
+
+def test_clear_gpbr3_is_no_failure(env):
+    resume_env(env, loops=1)
+    env.put("gpbr3", "0x00000000\n")
+    env.run()
+    assert "fast resume failed" not in env.daemon_log()
+    assert not (env.data / "lifelog" / "resume").exists()
+
+
+def test_failures_disable_resume_until_docked(env):
+    resume_env(env, loops=3)
+    env.state()
+    (env.data / "lifelog" / "resume").write_text("resume_fail=2\nsleep_count=5\n")
+    env.put("gpbr3", "0x4D505701\n")
+    env.run()
+    assert resume_file(env)["resume_fail"] == "3"
+    assert poweroff_alarm(env) == "+15"
+    assert not (env.s / "pm_state").exists()
+    assert "fast resume disabled" in env.daemon_log()
+    assert env.csv_rows()[0]["end"] == "poweroff"
+
+
+def test_below_max_fail_still_resumes(env):
+    resume_env(env, loops=3)
+    env.state()
+    (env.data / "lifelog" / "resume").write_text("resume_fail=1\nsleep_count=0\n")
+    env.put("gpbr3", "0x4D505700\n")
+    env.run()
+    assert resume_file(env)["resume_fail"] == "2"
+    assert (env.s / "pm_state").read_text().strip() == "mem"
+
+
+def test_docking_resets_failure_count(env):
+    resume_env(env, vbus="present\n", loops=2)
+    env.state()
+    (env.data / "lifelog" / "resume").write_text("resume_fail=3\nsleep_count=5\n")
+    env.run()
+    assert resume_file(env) == {"resume_fail": "0", "sleep_count": "5"}
+
+
+def test_clean_resume_does_not_reset_failures(env):
+    resume_env(env, loops=4)
+    env.state()
+    (env.data / "lifelog" / "resume").write_text("resume_fail=2\nsleep_count=0\n")
+    env.run()
+    assert resume_file(env)["resume_fail"] == "2"
+    assert len(env.csv_rows()) == 2
+

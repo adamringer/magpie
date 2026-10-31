@@ -1,8 +1,9 @@
 #!/bin/sh
 # magpie-lifelogd: lifelog daemon. While VBUS is present it does nothing (docked: USB Ethernet, charging).
-# Without VBUS it runs one cycle and powers off with an RTC alarm and the accelerometer armed for a tap:
-# battery check, position, photo + GPS snapshot, smart skips, next alarm, log line. See docs/LIFELOG.md.
-# No set -e: every helper may fail and the cycle must still end in a power-off.
+# Without VBUS it runs a cycle: battery check, position, photo + GPS snapshot, smart skips, next alarm, log line.
+# Then it sleeps until the RTC alarm: SLEEP_MODE=resume (default) uses the kernel's fast-resume sleep (echo mem,
+# same boot) and loops; every COLD_EVERY-th sleep, and SLEEP_MODE=poweroff, is a real power-off + RTC wake.
+# See docs/LIFELOG.md. No set -e: every helper may fail and the cycle must still end in a sleep or power-off.
 set -u
 LIFELOG_LIB=${LIFELOG_LIB:-/usr/lib/magpie-lifelog.sh}
 . "$LIFELOG_LIB" || exit 1
@@ -11,6 +12,14 @@ ll_load_conf
 CSV_HEADER="date,wake,up_start_s,battery,x_raw,y_raw,z_raw,x_mg,y_mg,z_mg,photo,photo_bytes,photo_ok,gps_ok,facedown,dark,period_s,alarm_s,up_end_s,end"
 FD_COUNT=0
 DARK_COUNT=0
+RESUME_FAILS=0 # failed fast resumes since the last docking (file $LL_DIR/resume)
+SLEEP_COUNT=0  # fast-resume sleeps since the last cold power-off (file $LL_DIR/resume)
+CYCLE_T0=0     # uptime when the current wake began (0 after a cold boot)
+CYCLE_PRE=$BOOT_PREAMBLE # seconds between the alarm and CYCLE_T0 (bootloaders; 0 after a resume)
+RESUME_LOADED=0
+PENDING_FAIL=  # GPBR3 marker found at start, counted once /data is readable
+UDC_NAME=      # gadget UDC name remembered while the gadget is unbound for a sleep
+GADGET_UNBOUND=0
 
 # ---- VBUS ----
 # 0 = present, 1 = absent, 2 = unknown (devmem failed: treated like docked, never powers off)
@@ -78,11 +87,142 @@ save_state() {
 		mv -f "$LL_DIR/state.tmp" "$LL_DIR/state" 2> /dev/null
 }
 
+# Fast-resume bookkeeping lives in its own file so state keeps the two skip counters only.
+load_resume_state() {
+	RESUME_FAILS=0
+	SLEEP_COUNT=0
+	[ -f "$LL_DIR/resume" ] || return 0
+	while IFS='=' read -r k v; do
+		case "$v" in '' | *[!0-9]*) continue ;; esac
+		case "$k" in
+		resume_fail) RESUME_FAILS=$v ;;
+		sleep_count) SLEEP_COUNT=$v ;;
+		esac
+	done < "$LL_DIR/resume"
+}
+
+save_resume_state() {
+	ll_ensure_dir || return 0
+	printf 'resume_fail=%s\nsleep_count=%s\n' "$RESUME_FAILS" "$SLEEP_COUNT" > "$LL_DIR/resume.tmp" 2> /dev/null &&
+		mv -f "$LL_DIR/resume.tmp" "$LL_DIR/resume" 2> /dev/null
+}
+
+# GPBR3 holds the kernel's fast-resume markers 0x4D5057xx. Prints the value if it is one, else nothing.
+gpbr3_marker() {
+	_g=$($DEVMEM "$GPBR3" 32 2> /dev/null)
+	case "$_g" in 0x[0-9a-fA-F]* | [0-9]*) ;; *) return 0 ;; esac
+	[ $((_g & 0xFFFFFF00)) -eq $((0x4D505700)) ] && echo "$_g"
+	return 0
+}
+
+# At daemon start: a marker left in GPBR3 on a cold boot means a fast-resume sleep was started and failed.
+# It is cleared at once and counted when the counters can be read (/data mounted), see ensure_resume_loaded.
+note_resume_failure() {
+	PENDING_FAIL=$(gpbr3_marker)
+	[ -n "$PENDING_FAIL" ] && $DEVMEM "$GPBR3" 32 0 2> /dev/null
+	return 0
+}
+
+# Load the counters once /data is mounted, then count a failure noted at start. 1 = /data not ready yet.
+ensure_resume_loaded() {
+	[ "$RESUME_LOADED" = 1 ] && return 0
+	ll_data_ok || return 1
+	RESUME_LOADED=1
+	load_resume_state
+	if [ -n "$PENDING_FAIL" ]; then
+		RESUME_FAILS=$((RESUME_FAILS + 1))
+		ll_log "fast resume failed (GPBR3=$PENDING_FAIL), failures since last docking: $RESUME_FAILS of $RESUME_MAX_FAIL"
+		PENDING_FAIL=
+		save_resume_state
+		[ "$RESUME_FAILS" -ge "$RESUME_MAX_FAIL" ] && ll_log "fast resume disabled: every sleep is a power-off until USB is plugged in"
+	fi
+	return 0
+}
+
+# Docking proves a human is there: forget the failures, put the gadget back if a sleep left it unbound.
+note_docked() {
+	rebind_gadget
+	ensure_resume_loaded || return 0
+	if [ "$RESUME_FAILS" -ne 0 ]; then
+		ll_log "docked: fast resume failure count $RESUME_FAILS reset"
+		RESUME_FAILS=0
+		save_resume_state
+	fi
+}
+
+unbind_gadget() {
+	_u=$(cat "$UDC_FILE" 2> /dev/null)
+	[ -n "$_u" ] && UDC_NAME=$_u
+	[ -n "$_u" ] || return 0
+	echo "" > "$UDC_FILE" 2> /dev/null
+	GADGET_UNBOUND=1
+}
+
+rebind_gadget() {
+	[ "$GADGET_UNBOUND" = 1 ] || return 0
+	GADGET_UNBOUND=0
+	[ -n "$UDC_NAME" ] || return 0
+	echo "$UDC_NAME" > "$UDC_FILE" 2> /dev/null || ll_log "rebinding the USB gadget to '$UDC_NAME' failed"
+}
+
+# Wake source after a fast resume, from the kernel line "at91-backup: resumed, SHDW_SR=0x...".
+# Bit 17 = RTC, bit 0 = WKUP0 (USB plug-in or accelerometer): same words as the cold-boot "Wake-Up source:".
+resume_wake_source() {
+	_l=$($DMESG_CMD 2> /dev/null | grep 'at91-backup: resumed, SHDW_SR=' | tail -n 1)
+	_sr=${_l##*SHDW_SR=}
+	_sr=${_sr%%[!0-9a-fA-FxX]*}
+	case "$_sr" in 0x[0-9a-fA-F]* | [0-9]*) ;; *)
+		echo none
+		return 0
+		;;
+	esac
+	if [ $((_sr & 0x20000)) -ne 0 ]; then echo RTC; else echo unknown; fi
+}
+
+# 0 = this sleep is a fast-resume sleep, 1 = power off (poweroff mode, resume disabled by failures, or a cold boot is due)
+want_resume() {
+	[ "$SLEEP_MODE" = resume ] || return 1
+	if [ "$RESUME_FAILS" -ge "$RESUME_MAX_FAIL" ]; then
+		ll_log "fast resume disabled after $RESUME_FAILS failures: powering off"
+		return 1
+	fi
+	if [ "$COLD_EVERY" -gt 0 ] && [ $((SLEEP_COUNT + 1)) -ge "$COLD_EVERY" ]; then
+		SLEEP_COUNT=0
+		save_resume_state
+		ll_log "sleep $COLD_EVERY of $COLD_EVERY: cold boot"
+		return 1
+	fi
+	SLEEP_COUNT=$((SLEEP_COUNT + 1))
+	save_resume_state
+	return 0
+}
+
+# Fast-resume sleep until the RTC alarm (already armed). Returns 0 after the wake, 1 if the kernel refused to sleep.
+# Sets WAKE_SRC, CYCLE_T0 and CYCLE_PRE for the next cycle.
+do_sleep() {
+	sync
+	$DEVMEM "$GPBR3" 32 0 2> /dev/null
+	unbind_gadget
+	ll_log "sleeping (fast resume), sleep $SLEEP_COUNT"
+	if echo mem > "$PM_STATE" 2> /dev/null; then
+		WAKE_SRC=$(resume_wake_source)
+		CYCLE_T0=$(ll_uptime)
+		CYCLE_PRE=0
+		_g=$(gpbr3_marker)
+		[ -n "$_g" ] && $DEVMEM "$GPBR3" 32 0 2> /dev/null
+		ll_log "resumed: wake '$WAKE_SRC', GPBR3 was ${_g:-clear}"
+		return 0
+	fi
+	ll_log "echo mem > $PM_STATE failed: powering off instead"
+	rebind_gadget
+	return 1
+}
+
 write_csv() { # end-reason
 	ll_ensure_dir || return 0
 	ll_rotate "$LL_DIR/log.csv"
 	[ -f "$LL_DIR/log.csv" ] || echo "$CSV_HEADER" > "$LL_DIR/log.csv" 2> /dev/null
-	echo "$(ll_now),$wake,$up_start,$battery,$xr,$yr,$zr,$xm,$ym,$zm,$photo,$photo_bytes,$photo_ok,$gps_ok,$fd,$dark,$period,$alarm,$(ll_uptime),$1" >> "$LL_DIR/log.csv" 2> /dev/null
+	echo "$(ll_now),$wake,$up_start,$battery,$xr,$yr,$zr,$xm,$ym,$zm,$photo,$photo_bytes,$photo_ok,$gps_ok,$fd,$dark,$period,$alarm,$(($(ll_uptime) - CYCLE_T0)),$1" >> "$LL_DIR/log.csv" 2> /dev/null
 }
 
 # RTC alarm: relative, then verified by reading it back. 0 = armed.
@@ -119,6 +259,8 @@ disarm_alarm() { echo 0 > "$RTC_DIR/wakealarm" 2> /dev/null; }
 
 do_poweroff() {
 	sync
+	_g=$(gpbr3_marker) # a finished resume leaves a marker; it must not look like a failure at the next cold boot
+	[ -n "$_g" ] && $DEVMEM "$GPBR3" 32 0 2> /dev/null
 	ll_log "powering off"
 	$POWEROFF_CMD
 	ll_log "poweroff returned"
@@ -179,7 +321,7 @@ blink() {
 
 # ---- one lifelog cycle; returns only when it did not power off ----
 run_cycle() {
-	up_start=$(ll_uptime)
+	up_start=$(($(ll_uptime) - CYCLE_T0))
 	wake=$WAKE_SRC
 	battery= xr= yr= zr= xm= ym= zm= photo= photo_bytes= photo_ok=0 gps_ok=0 fd=0 dark=0 period= alarm=
 	ll_log "cycle start: wake '$wake', uptime ${up_start}s"
@@ -273,7 +415,7 @@ run_cycle() {
 	save_state
 
 	# e. next alarm, wake to wake
-	alarm=$((period - $(ll_uptime) - BOOT_PREAMBLE))
+	alarm=$((period - ($(ll_uptime) - CYCLE_T0) - CYCLE_PRE))
 	[ "$alarm" -lt "$MIN_ALARM" ] && alarm=$MIN_ALARM
 	if ! set_alarm "$alarm"; then
 		ll_log "RTC alarm could not be set: staying awake, retry in ${NOALARM_RETRY}s"
@@ -291,9 +433,26 @@ run_cycle() {
 		disarm_alarm
 		run_logged "accel" $ACCEL_CMD wake none
 		write_csv docked
+		note_docked
 		return 0
 	fi
-	write_csv poweroff
+	if want_resume; then
+		write_csv sleep
+		if do_sleep; then
+			# VBUS present after the wake (USB plug-in): behave like a plug-in; absent: next cycle starts at once
+			vbus_state
+			if [ $? -ne 1 ]; then
+				ll_log "VBUS present after resume: staying docked"
+				note_docked
+			else
+				RESUMED=1
+			fi
+			return 0
+		fi
+		# the kernel refused: fall through to the power-off path for this cycle
+	else
+		write_csv poweroff
+	fi
 	do_poweroff
 }
 
@@ -304,13 +463,18 @@ main() {
 	ll_log "start: wake '$WAKE_SRC', interval ${INTERVAL}s, gps $GPS, faceDown axis '${FACEDOWN_AXIS:-off}', accel wake $ACCEL_WAKE"
 	need=$VBUS_CHECKS
 	[ "$WAKE_SRC" != none ] && need=1 # RTC / WKUP0 wake: don't wait for the debounce
+	RESUMED=0
+	note_resume_failure
 	unplugged=0
 	off_logged=0
 	data_waited=0
 	loops=0
 	while :; do
+		ensure_resume_loaded
 		vbus_state
-		if [ $? -eq 1 ]; then unplugged=$((unplugged + 1)); else unplugged=0; fi
+		_vs=$?
+		[ "$_vs" -eq 0 ] && note_docked
+		if [ "$_vs" -eq 1 ]; then unplugged=$((unplugged + 1)); else unplugged=0; fi
 		if [ "$unplugged" -ge "$need" ]; then
 			need=$VBUS_CHECKS
 			if [ "$data_waited" = 0 ]; then
@@ -329,6 +493,10 @@ main() {
 			else
 				off_logged=0
 				run_cycle
+				if [ "$RESUMED" = 1 ]; then
+					RESUMED=0
+					need=1 # fast-resume wake: no debounce, like an RTC cold-boot wake
+				fi
 			fi
 			unplugged=0
 		fi

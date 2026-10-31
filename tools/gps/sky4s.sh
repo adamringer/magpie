@@ -10,6 +10,8 @@
 # Only one instance runs (lock dir). Start it detached; it survives the telnet session and USB unplug:
 #   start-stop-daemon -S -b -x /data/sky4s.sh -- 10 30 120
 COUNT=${1:-10}; PERIOD=${2:-30}; DELAY=${3:-60}
+# a newer gpsnap test build in /data wins (writes the PATH.time capture timestamp)
+GPSNAP=gpsnap; [ -x /data/gpsnap.new ] && GPSNAP=/data/gpsnap.new
 OUT=/data/gps/sky4s; mkdir -p "$OUT"; LOG=$OUT/log.txt
 LOCK=/run/sky4s.lock
 mkdir "$LOCK" 2>/dev/null || { echo "$(date -u '+%F %T') already running, not started" >> "$LOG"; exit 1; }
@@ -19,7 +21,7 @@ restore() {
 	rmdir "$LOCK"
 }
 trap 'restore; exit 1' INT TERM
-echo "$(date -u '+%F %T') start count=$COUNT period=$PERIOD delay=$DELAY" >> "$LOG"; sync
+echo "$(date -u '+%F %T') start count=$COUNT period=$PERIOD delay=$DELAY gpsnap=$GPSNAP" >> "$LOG"; sync
 /etc/init.d/S51chargeled stop; /etc/init.d/S50lifelog stop
 led 'magpie:d*' 0
 sleep "$DELAY"
@@ -28,7 +30,7 @@ while [ "$i" -le "$COUNT" ]; do
 	t0=$(date +%s)
 	for try in 1 2; do
 		f=$OUT/$(date -u +%Y%m%d-%H%M%S).snap
-		led 'magpie:d1' 255; gpsnap -s 4096 -a 1 -v -o "$f" >> "$OUT/gpsnap.out" 2>&1; rc=$?; led 'magpie:d1' 0
+		led 'magpie:d1' 255; $GPSNAP -s 4096 -a 1 -v -o "$f" >> "$OUT/gpsnap.out" 2>&1; rc=$?; led 'magpie:d1' 0
 		echo "$(date -u '+%F %T') $i $f rc=$rc try=$try" >> "$LOG"; sync
 		[ "$rc" = 3 ] || break
 	done

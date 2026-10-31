@@ -560,6 +560,8 @@ static void status_regs(void)
 struct stats {
 	unsigned pages_done;
 	unsigned overruns;
+	int64_t first_rt_ns; /* CLOCK_REALTIME of page 0's DATA READY edge (page 0 complete) */
+	int first_from_edge; /* 1: from the kernel edge timestamp, 0: line was already low (read time) */
 	int64_t *t;       /* clock_gettime at each page start */
 	uint64_t *edge;   /* newest kernel edge timestamp seen before each page (0 = none) */
 };
@@ -583,6 +585,17 @@ static int capture(uint8_t *buf, unsigned pages, struct stats *st)
 		}
 		st->t[p] = now_ns();
 		st->edge[p] = ts;
+		if (p == 0) {
+			/* the edge timestamp is CLOCK_MONOTONIC: move it to CLOCK_REALTIME */
+			struct timespec rt;
+			int64_t rt_ns, mono_ns;
+
+			clock_gettime(CLOCK_REALTIME, &rt);
+			mono_ns = now_ns();
+			rt_ns = (int64_t)rt.tv_sec * 1000000000 + rt.tv_nsec;
+			st->first_from_edge = ts != 0;
+			st->first_rt_ns = ts ? rt_ns - (mono_ns - (int64_t)ts) : rt_ns;
+		}
 		if (n > 1)
 			st->overruns += n - 1;
 		/* stock 0x9e64: chip select low, read 4096 bytes, chip select high (here: one SPI message) */
@@ -693,6 +706,34 @@ static int write_file(const char *path, const uint8_t *buf, size_t len)
 		return -1;
 	}
 	return 0;
+}
+
+/*
+ * Sidecar PATH.time: the UTC time of page 0's DATA READY edge, i.e. the end of the first 16 ms page, so sample 0
+ * of the file is about 16 ms earlier. Lets a position solver use the capture time to the millisecond.
+ */
+static void write_time_file(const char *path, const struct stats *st, unsigned pages)
+{
+	char tpath[600], when[32];
+	time_t sec = (time_t)(st->first_rt_ns / 1000000000);
+	long usec = (long)((st->first_rt_ns % 1000000000) / 1000);
+	struct tm tmv;
+	FILE *f;
+
+	if (snprintf(tpath, sizeof(tpath), "%s.time", path) >= (int)sizeof(tpath))
+		return;
+	gmtime_r(&sec, &tmv);
+	strftime(when, sizeof(when), "%Y-%m-%dT%H:%M:%S", &tmv);
+	f = fopen(tpath, "w");
+	if (!f) {
+		err("cannot create %s: %s", tpath, strerror(errno));
+		return;
+	}
+	fprintf(f, "first_page_utc=%s.%06ldZ\nsource=%s\npages=%u\n", when, usec,
+		st->first_from_edge ? "edge" : "level", pages);
+	if (fflush(f) || fsync(fileno(f)) || fclose(f))
+		err("write %s: %s", tpath, strerror(errno));
+	vlog("first page (DATA READY edge) at %s.%06ldZ (%s)", when, usec, st->first_from_edge ? "edge" : "level");
 }
 
 static int verify_buffer(const uint8_t *buf, unsigned pages)
@@ -843,6 +884,7 @@ static int run(void)
 		rc = EXIT_WRITE;
 		goto out;
 	}
+	write_time_file(out, &st, pages);
 	printf("%s: %u pages, %u bytes\n", out, pages, pages * GPS_PAGE_BYTES);
 	if (g.o.verify && verify_buffer(buf, pages))
 		rc = EXIT_VERIFY;

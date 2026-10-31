@@ -62,6 +62,7 @@ struct opts {
 	int verify;
 	int verbose;
 	int version_only;
+	int pins_only;
 	const char *out;
 };
 
@@ -752,7 +753,7 @@ static int run(void)
 	const char *out = g.o.out;
 	int rc, tries, ok = 0;
 
-	if (!g.o.version_only) {
+	if (!g.o.version_only && !g.o.pins_only) {
 		/* everything allocated and touched before the capture starts */
 		if (posix_memalign((void **)&buf, 4096, (size_t)pages * GPS_PAGE_BYTES)) {
 			err("out of memory");
@@ -771,6 +772,16 @@ static int run(void)
 
 	if (gpio_setup(g.o.lna)) {
 		rc = EXIT_DEVICE;
+		goto out;
+	}
+	/*
+	 * Stock's aclys_gpio module drove RESET (and CS, and the LNA) high when it loaded at boot and
+	 * kept them there. Released lines keep their level on this SoC, so S14gps runs this once at boot
+	 * to start every capture from the same pin state.
+	 */
+	if (g.o.pins_only) {
+		vlog("pins set: RESET = 1, LNA = %d", g.o.lna ? 1 : 0);
+		rc = EXIT_OK;
 		goto out;
 	}
 	/* stock fn 0x8a48: up to 10 tries at opening and resetting */
@@ -854,6 +865,7 @@ static void usage(FILE *f)
 		"  -v       verbose (timing statistics, overrun count)\n"
 		"  -h       this help\n"
 		"  --version-only  reset, print the chip's version register, power down\n"
+		"  --pins-only     drive RESET high and LNA to the -a value, then exit (boot-time pin state)\n"
 		"Exit: 0 ok, 1 usage, 2 device error, 3 DATA READY timeout, 4 write error, 5 verify mismatch\n",
 		GPS_MS_DEFAULT, DEFAULT_DIR);
 }
@@ -862,6 +874,7 @@ int main(int argc, char **argv)
 {
 	static const struct option longopts[] = {
 		{ "version-only", no_argument, NULL, 'V' },
+		{ "pins-only", no_argument, NULL, 'P' },
 		{ "help", no_argument, NULL, 'h' },
 		{ NULL, 0, NULL, 0 },
 	};
@@ -901,6 +914,9 @@ int main(int argc, char **argv)
 			break;
 		case 'V':
 			g.o.version_only = 1;
+			break;
+		case 'P':
+			g.o.pins_only = 1;
 			break;
 		case 'h':
 			usage(stdout);

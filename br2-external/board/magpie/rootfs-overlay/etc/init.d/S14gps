@@ -42,5 +42,11 @@ log "start (background)"
 	else
 		log "no /dev/spidev* after bind"
 	fi
+	# Like stock's aclys_gpio at load: RESET and the LNA high from boot on (the lines keep their level).
+	if gpsnap --pins-only -a 1 > /dev/null 2>&1; then
+		log "GPS RESET and LNA driven high"
+	else
+		log "gpsnap --pins-only FAILED"
+	fi
 ) > /dev/null 2>&1 &
 exit 0

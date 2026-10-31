@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         which sed make binutils build-essential diffutils gcc g++ bash patch \
         gzip bzip2 perl tar cpio unzip rsync file bc findutils wget git \
         python3 libncurses-dev ca-certificates xz-utils locales \
+        cmake u-boot-tools \
     && rm -rf /var/lib/apt/lists/* \
     && locale-gen en_US.UTF-8
 

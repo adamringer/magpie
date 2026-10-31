@@ -10,3 +10,5 @@ for s in S50telnet S01seedrng S01syslogd S02klogd S50crond S90httpd S41ifplugd \
          S40network; do
     rm -f "$TARGET_DIR/etc/init.d/$s"
 done
+# The external toolchain also ships C++, Fortran and OpenMP runtimes; everything on the device is C.
+rm -f "$TARGET_DIR"/usr/lib/libstdc++.so* "$TARGET_DIR"/usr/lib/libgfortran.so* "$TARGET_DIR"/usr/lib/libgomp.so*

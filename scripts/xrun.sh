@@ -5,7 +5,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-IMAGE="magpie-br:$(sed -n 's/^BR_VERSION=//p' "$ROOT/scripts/br.sh")"
+IMAGE="magpie-br:$(sed -n 's/^BR_VERSION=//p' "$ROOT/scripts/br.sh")-$(sha256sum "$ROOT/docker/Dockerfile" | cut -c1-8)"
 
 docker image inspect "$IMAGE" >/dev/null 2>&1 \
     || { echo "no image $IMAGE; run scripts/br.sh first" >&2; exit 1; }

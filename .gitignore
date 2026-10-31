@@ -17,3 +17,6 @@ output-restore/
 restore/*.elf
 tools/tapscope/tapscope
 tools/tapscope/clicktest
+/.ccache/
+/output-fast/
+/output-restore-fast/

@@ -11,7 +11,8 @@ set -euo pipefail
 BR_VERSION=2026.08.1
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-IMAGE="magpie-br:${BR_VERSION}"
+# The tag includes a hash of the Dockerfile, so editing it rebuilds the image.
+IMAGE="magpie-br:${BR_VERSION}-$(sha256sum "$ROOT/docker/Dockerfile" | cut -c1-8)"
 TARBALL="buildroot-${BR_VERSION}.tar.xz"
 BASE_URL="https://buildroot.org/downloads"
 BR_OUTPUT="${BR_OUTPUT:-output}"

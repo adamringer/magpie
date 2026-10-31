@@ -164,3 +164,12 @@ CONFIG_BINFMT_SCRIPT=y
 # musl uses the old 32-bit-time syscalls (nanosleep, futex, ppoll, ...) whenever the values fit
 # in 32 bits. Without this every sleep returned at once (ENOSYS): the watchdog loop spun at 100% CPU.
 CONFIG_COMPAT_32BIT_TIME=y
+# Full preemption: a SCHED_FIFO gpsnap must not wait behind non-preemptible kernel work (squashfs XZ
+# page-ins of the per-second daemons stalled it 20-40 ms; the GPS chip buffers only ~2 pages of 16 ms)
+CONFIG_PREEMPT=y
+# Self-recovery: a task stuck in D state for 120 s or a soft lockup panics, and panic=10 reboots
+CONFIG_DEBUG_KERNEL=y
+CONFIG_DETECT_HUNG_TASK=y
+CONFIG_BOOTPARAM_HUNG_TASK_PANIC=y
+CONFIG_SOFTLOCKUP_DETECTOR=y
+CONFIG_BOOTPARAM_SOFTLOCKUP_PANIC=y

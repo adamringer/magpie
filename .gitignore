@@ -20,3 +20,8 @@ tools/tapscope/clicktest
 /.ccache/
 /output-fast/
 /output-restore-fast/
+
+# Private notes (analysis of the stock firmware, board notes, photos): not published. A doc becomes public only
+# once reviewed, by adding a !/docs/NAME.md line below.
+/docs/*
+!/docs/PHONE_USB.md

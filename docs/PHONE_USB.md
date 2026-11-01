@@ -55,6 +55,15 @@ the daemon then discards input until the next packet boundary (it must never wed
 
 Text payloads (requests and JSON results) are UTF-8 JSON objects, no trailing NUL.
 
+Clarifications (from the first client implementation):
+- The device never sends a zero-length packet to end a response; the host frames by `len` and sizes its reads
+  to whole packets. The host likewise never sends a ZLP after a request.
+- An error reply to a request whose header could be parsed echoes that request's `cmd | 0x8000` and `seq`;
+  for an unparsable header it uses `cmd = 0x8000`, `seq = 0`.
+- LIST `mtime` is seconds since the epoch (UTC). HASH `size` is the file size in bytes. DELETE `err` is a short
+  free-text reason (clients only rely on `ok`).
+- READ with `offset` at or past the end of the file returns status 0 and 0 bytes (EOF), not an error.
+
 ## Commands
 
 All file names are bare names inside `/data/photos` matching `^[0-9]{8}-[0-9]{6}\.(jpg|snap|snap\.time)$`;

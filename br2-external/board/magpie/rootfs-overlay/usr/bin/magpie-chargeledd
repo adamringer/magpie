@@ -94,6 +94,9 @@ main() {
 			;;
 		esac
 		if [ "$docked" = 1 ]; then
+			# redraw everything once a minute: anything else writing the LEDs (test scripts, the lifelog
+			# blink) would otherwise leave a wrong display until the mask changes (seen 2026-11-01)
+			[ $((tick % 60)) -eq 59 ] && MASK=????
 			if [ "$tick" -ge "$next_chg" ]; then
 				next_chg=$((tick + CHARGE_EVERY))
 				_c=$($CHARGE_CMD 2> /dev/null)

@@ -108,6 +108,31 @@ def elev(rx, sp):
     return np.degrees(np.arcsin(d @ up))
 
 
+def azel(rx, sp, lla=None):
+    """(elevation, azimuth) in degrees of satellite position sp seen from rx; lla = ecef2lla(rx) if known."""
+    lat, lon, _ = lla if lla is not None else ecef2lla(rx)
+    la, lo = np.radians(lat), np.radians(lon)
+    east = np.array([-np.sin(lo), np.cos(lo), 0.0])
+    north = np.array([-np.sin(la) * np.cos(lo), -np.sin(la) * np.sin(lo), np.cos(la)])
+    up = np.array([np.cos(la) * np.cos(lo), np.cos(la) * np.sin(lo), np.sin(la)])
+    d = (sp - rx) / np.linalg.norm(sp - rx)
+    return np.degrees(np.arcsin(d @ up)), np.degrees(np.arctan2(d @ east, d @ north)) % 360.0
+
+
+USE_IONO = True     # Klobuchar from the nav file header (eph.iono); joint.py --no-iono turns it off
+
+
+def atmo(eph, x, sp, t):
+    """troposphere + ionosphere delay (m) on the path from sp to a receiver at x (near the ground) at GPS time t"""
+    lla = ecef2lla(x)
+    el, az = azel(x, sp, lla)
+    d = 2.4 / np.sin(np.radians(max(el, 3.0)))           # simple zenith delay / sin(elevation)
+    iono = getattr(eph, 'iono', None)
+    if USE_IONO and iono is not None:
+        d += C * nav.klobuchar(iono, lla[0], lla[1], max(el, 0.0), az, t % 604800.0)
+    return d
+
+
 # ---------------------------------------------------------------- measurements
 def wiped(F0, F1, eta, nb):
     """block spectra with the carrier removed and the code slide undone (PRN-independent)"""
@@ -269,9 +294,8 @@ def code_fix(meas, eph, t0, x0, tc_prior=None, tc_sigma=None, grid=True):
             t = t0 + tc + meas[p]['tau']
             rho, clk, v, sp = geom(e[p], x, t)
             pr_meas = C * meas[p]['tau'] + N[p] * MS
-            el = np.radians(max(elev(x, sp), 3.0)) if np.linalg.norm(x) > 6.0e6 else np.pi / 2
-            tropo = 2.4 / np.sin(el)                 # simple zenith delay / sin(elevation)
-            r.append(pr_meas - (rho + tropo + cb - C * clk))
+            d = atmo(eph, x, sp, t) if np.linalg.norm(x) > 6.0e6 else 2.4
+            r.append(pr_meas - (rho + d + cb - C * clk))
         # soft constraint: near the ground (a 100 m height error weighs like a 10 m pseudorange error);
         # five unknowns from six satellites otherwise allow false fits deep underground with a large time error
         r.append(ecef2lla(x)[2] / 10.0)

@@ -13,6 +13,7 @@ Either way the scripts see one file name and one format.
 read() parses RINEX 2 GPS nav files; given a RINEX 3 file it converts it first (rnx3_to_rnx2), so old files still work.
 """
 import datetime
+import math
 import gzip
 import os
 import sys
@@ -36,9 +37,12 @@ def _version(lines):
 def rnx3_to_rnx2(lines):
     """RINEX 3 nav (mixed or GPS-only) -> RINEX 2.11 GPS nav lines. Non-GPS records are dropped."""
     out = ['     2.11           N: GPS NAV DATA                         RINEX VERSION / TYPE',
-           'converted from RINEX %-39sCOMMENT' % lines[0][:9].strip(),
-           '                                                            END OF HEADER']
+           'converted from RINEX %-39sCOMMENT' % lines[0][:9].strip()]
     i = next(k for k, l in enumerate(lines) if 'END OF HEADER' in l) + 1
+    for l in lines[:i]:                  # Klobuchar coefficients, if the RINEX 3 header has them
+        if 'IONOSPHERIC CORR' in l and l[:4] in ('GPSA', 'GPSB'):
+            out.append('  ' + l[5:53].rstrip().ljust(58) + ('ION ALPHA' if l[:4] == 'GPSA' else 'ION BETA'))
+    out.append('                                                            END OF HEADER')
     while i < len(lines):
         l = lines[i]
         if not l.startswith('G'):        # other systems, and continuation lines of their records
@@ -53,14 +57,25 @@ def rnx3_to_rnx2(lines):
     return out
 
 
+class Eph(dict):
+    """{prn: [ephemeris dict, ...]}, plus .iono = (alpha[4], beta[4]) Klobuchar coefficients or None."""
+    iono = None
+
+
 def read(path):
-    """{prn: [ephemeris dict, ...]} from a RINEX 2 GPS nav file (a RINEX 3 file is converted first)."""
+    """Eph from a RINEX 2 GPS nav file (a RINEX 3 file is converted first)."""
     lines = _lines(path)
     if _version(lines) >= 3:
         lines = rnx3_to_rnx2(lines)
     i = next(k for k, l in enumerate(lines) if 'END OF HEADER' in l) + 1
     f = lambda t: float(t.replace('D', 'E').replace('d', 'e')) if t.strip() else 0.0
-    eph = {}
+    eph = Eph()
+    hdr = {l[60:].strip(): [f(l[2:14]), f(l[14:26]), f(l[26:38]), f(l[38:50])] for l in lines[:i]
+           if l[60:].strip() in ('ION ALPHA', 'ION BETA')}
+    if len(hdr) == 2:
+        eph.iono = (hdr['ION ALPHA'], hdr['ION BETA'])
+    else:
+        print('nav: no Klobuchar coefficients in %s, no ionosphere correction' % path, file=sys.stderr)
     while i + 7 < len(lines):
         l = lines[i].ljust(79)
         prn = int(l[0:2])
@@ -79,6 +94,25 @@ def read(path):
         eph.setdefault(prn, []).append(e)
         i += 8
     return eph
+
+
+def klobuchar(iono, lat, lon, el, az, tow):
+    """L1 ionospheric delay (s), IS-GPS-200 20.3.3.5.2.5. lat, lon, el, az in degrees, tow = GPS time of week (s)."""
+    alpha, beta = iono
+    E = el / 180.0                                        # semicircles
+    psi = 0.0137 / (E + 0.11) - 0.022                     # Earth-centred angle
+    phi = lat / 180.0 + psi * math.cos(math.radians(az))  # ionospheric pierce point
+    phi = max(-0.416, min(0.416, phi))
+    lam = lon / 180.0 + psi * math.sin(math.radians(az)) / math.cos(phi * math.pi)
+    phim = phi + 0.064 * math.cos((lam - 1.617) * math.pi)   # geomagnetic latitude
+    t = (4.32e4 * lam + tow) % 86400.0                    # local time
+    F = 1.0 + 16.0 * (0.53 - E) ** 3                      # slant factor
+    amp = max(0.0, sum(a * phim ** n for n, a in enumerate(alpha)))
+    per = max(72000.0, sum(b * phim ** n for n, b in enumerate(beta)))
+    x = 2 * math.pi * (t - 50400.0) / per
+    if abs(x) < 1.57:
+        return F * (5e-9 + amp * (1 - x * x / 2 + x ** 4 / 24))
+    return F * 5e-9
 
 
 def convert(src, dst):

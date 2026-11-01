@@ -63,11 +63,13 @@ def main():
     ap.add_argument('--sigma', type=float, default=0.5)
     ap.add_argument('--ref', default=None)
     ap.add_argument('--out', default=None)
+    ap.add_argument('--no-iono', action='store_true', help='no Klobuchar ionosphere correction (for comparison)')
     ap.add_argument('--seed-file', default=None, help='"lat lon" file (last known position) used instead of the Doppler fix')
     a = ap.parse_args()
     global SEED
     if a.seed_file:
         SEED = sf.seed_ecef(a.seed_file)
+    sf.USE_IONO = not a.no_iono
 
     eph = sf.read_nav(a.nav)
     caps = {}

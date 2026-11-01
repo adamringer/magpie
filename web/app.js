@@ -1,4 +1,5 @@
-import { Client, DeviceError, batteryLevel, groupByDay, stemOf } from "./proto.js";
+import { Client, DeviceError, NAME_RE, batteryLevel, groupByDay, stemOf } from "./proto.js";
+import { readZip } from "./zipread.js";
 import { ZipWriter } from "./zip.js";
 import { FILTERS, WebUsbTransport, isClip, isSupported } from "./webusb.js";
 
@@ -16,7 +17,7 @@ const state = {
   files: [],
   days: [],
   selected: new Set(), // days
-  verified: [], // [{name, sha256, size}] verified and saved, deletable from the Clip
+  verified: new Map(), // name -> {name, sha256, size, clipChecked}: passed zip verification, deletable from the Clip
 };
 
 // -- helpers -------------------------------------------------------------------------------------------------
@@ -146,7 +147,8 @@ function render() {
   $("connect").textContent = connected ? "Connected" : "Connect";
   $("statusCard").hidden = !connected || !state.status;
   $("filesCard").hidden = !connected;
-  $("deleteCard").hidden = !connected || (state.verified.length === 0 && $("deleteResults").hidden);
+  $("zipPick").disabled = state.busy;
+  renderDelete();
   if (!connected) return;
 
   const st = state.status;
@@ -206,11 +208,18 @@ function render() {
   $("selAll").disabled = state.busy || state.days.length === 0;
   $("selSummary").textContent = `${sel.length} files, ${fmtBytes(sel.reduce((a, f) => a + f.size, 0))} selected`;
   $("download").disabled = state.busy || sel.length === 0;
+}
 
-  const n = state.verified.length;
-  $("deleteText").textContent = `${n} verified files (${fmtBytes(state.verified.reduce((a, f) => a + f.size, 0))}) from this download are saved. Once you have checked that the zip is where you want it, you can delete them from the Clip.`;
-  $("delete").textContent = `Delete these ${n} verified files from the Clip`;
-  $("delete").disabled = state.busy || n === 0;
+function renderDelete() {
+  const list = [...state.verified.values()];
+  const n = list.length;
+  $("deleteCard").hidden = n === 0 && $("deleteResults").hidden;
+  const size = fmtBytes(list.reduce((a, f) => a + f.size, 0));
+  $("deleteText").textContent = n
+    ? `${n} files are intact in the zip(s) you checked${state.connected ? "" : ". Connect the Clip to delete them"}. Only these can be deleted from the Clip.`
+    : "Nothing to delete. Verify a saved zip first.";
+  $("delete").textContent = `Delete ${n} verified files from the Clip (${size})`;
+  $("delete").disabled = state.busy || n === 0 || !state.connected;
 }
 
 function selectedFiles() {
@@ -232,7 +241,8 @@ function saveZip(parts, name) {
   setTimeout(() => URL.revokeObjectURL(url), 10 * 60 * 1000);
 }
 
-// Build and save one zip from verified results; returns the verified entries it holds.
+// Build and save one zip from verified results. Deleting from the Clip is only offered after the saved zip
+// has been read back (see onVerifyZips).
 function flushZip(batch) {
   if (batch.length === 0) return [];
   const sorted = [...batch].sort((a, b) => (a.name < b.name ? -1 : 1));
@@ -245,11 +255,7 @@ function flushZip(batch) {
   zip.addFile("SHA256SUMS", enc.encode(sums));
   const name = `magpie_${stemOf(sorted[0].name)}_to_${stemOf(sorted[sorted.length - 1].name)}.zip`;
   saveZip(zip.finish(), name);
-  const entries = sorted.map((r) => ({ name: r.name, sha256: r.sha256, size: r.size }));
-  saveHistory(entries);
-  const have = new Set(state.verified.map((f) => f.name));
-  state.verified.push(...entries.filter((e) => !have.has(e.name))); // kept across reconnects
-  return entries;
+  return sorted.length;
 }
 
 async function onDownload() {
@@ -321,10 +327,10 @@ async function onDownload() {
   if (aborted) {
     const gone = aborted instanceof Disconnected || !state.connected;
     const saved = savedZips ? ` ${savedZips} zip(s) with the files verified so far were saved.` : "";
-    if (gone) await teardown("The Clip was disconnected during the download, so it stopped." + saved + " Plug it in, tap Connect and start again.");
+    if (gone) await teardown("The Clip was disconnected during the download, so it stopped." + saved + " Plug it in, tap Connect and start again." + (savedZips ? " To delete the saved files from the Clip, use Verify saved zip." : ""));
     else await teardown("Download stopped by a USB error: " + (aborted.message || aborted) + "." + saved + " Reconnect to start again.");
   } else {
-    say(`Downloaded ${doneFiles - failed.length} of ${files.length} files in ${savedZips} zip(s). Check the Downloads folder.`, failed.length > 0);
+    say(`Downloaded ${doneFiles - failed.length} of ${files.length} files in ${savedZips} zip(s).` + (savedZips ? " Saved. To delete these from the Clip, tap Verify saved zip and pick the file(s)." : ""), failed.length > 0);
   }
   if (failed.length) {
     const ul = $("failed");
@@ -338,16 +344,16 @@ async function onDownload() {
 // -- delete --------------------------------------------------------------------------------------------------
 
 async function onDelete() {
-  const list = state.verified.slice();
+  const list = [...state.verified.values()];
   if (!list.length || state.busy || !state.connected) return;
   const total = fmtBytes(list.reduce((a, f) => a + f.size, 0));
-  if (!confirm(`Delete ${list.length} files (${total}) from the Clip?\n\nMake sure the zip was saved to your phone first. This cannot be undone.`)) return;
+  if (!confirm(`Delete ${list.length} files (${total}) from the Clip?\n\nMake sure the zip is saved where you want to keep it. This cannot be undone.`)) return;
   setBusy(true);
   const ul = $("deleteResults");
   try {
     const res = await state.client.deleteFiles(list);
     const okNames = new Set(res.filter((r) => r.ok).map((r) => r.name));
-    state.verified = state.verified.filter((f) => !okNames.has(f.name));
+    for (const n of okNames) state.verified.delete(n);
     ul.textContent = "";
     for (const r of res) {
       const li = document.createElement("li");
@@ -362,6 +368,89 @@ async function onDelete() {
     if (e instanceof DeviceError) say("The Clip refused: " + e.message, true);
     else handleLinkError(e);
   } finally {
+    setBusy(false);
+  }
+}
+
+// -- verify saved zip ----------------------------------------------------------------------------------------
+
+async function onVerifyZips(ev) {
+  const picked = [...ev.target.files];
+  ev.target.value = ""; // allow picking the same file again
+  if (!picked.length || state.busy) return;
+  setBusy(true);
+  const out = $("verifyResults");
+  out.textContent = "";
+  out.hidden = false;
+  $("vprogress").hidden = false;
+  const add = (text, cls = "") => {
+    const li = document.createElement("li");
+    li.textContent = text;
+    li.className = cls;
+    out.append(li);
+  };
+  let intact = 0;
+  let bad = 0;
+  const good = [];
+  try {
+    for (let k = 0; k < picked.length; k++) {
+      const f = picked[k];
+      const r = await readZip(f, {
+        onProgress: (done, total, name) => {
+          $("vbar").max = Math.max(1, total);
+          $("vbar").value = done;
+          $("vtext").textContent = `Zip ${k + 1} of ${picked.length} (${f.name}): ${(done / 1048576).toFixed(1)} of ${(total / 1048576).toFixed(1)} MB, ${name}`;
+        },
+      });
+      if (r.fatal) {
+        add(`${f.name}: cannot be read: ${r.fatal}`);
+        bad++;
+        continue;
+      }
+      for (const e of r.entries) {
+        if (e.name === "SHA256SUMS") continue;
+        if (!e.ok) {
+          bad++;
+          continue;
+        }
+        const item = { name: e.name, sha256: e.sha256, size: e.size, clipChecked: false };
+        if (NAME_RE.test(e.name)) good.push({ item, zip: f.name });
+        else add(`${f.name}: ${e.name} is intact but not a Clip file name, ignored`);
+      }
+      for (const p of r.problems) add(`${f.name}: ${p}`);
+    }
+    // Compare with the Clip's own HASH when connected.
+    for (const { item, zip } of good) {
+      if (state.connected) {
+        try {
+          const h = await state.client.hash(item.name);
+          if (h.sha256 !== item.sha256 || h.size !== item.size) {
+            add(`${zip}: ${item.name} differs from the file on the Clip, not eligible for deletion`);
+            bad++;
+            continue;
+          }
+          item.clipChecked = true;
+        } catch (e) {
+          if (!(e instanceof DeviceError)) throw e;
+          add(`${item.name}: no longer on the Clip (${e.errnoName})`, "ok");
+          intact++;
+          saveHistory([item]);
+          continue;
+        }
+      }
+      intact++;
+      saveHistory([item]);
+      state.verified.set(item.name, item);
+    }
+    const head = document.createElement("li");
+    head.className = bad ? "" : "ok";
+    head.textContent = `${intact} files intact${bad ? `, ${bad} with problems` : ""}.` + (state.connected ? "" : " The Clip is not connected, so they were not compared with it; connect to delete them.");
+    out.prepend(head);
+  } catch (e) {
+    if (e instanceof DeviceError) say("The Clip refused: " + e.message, true);
+    else handleLinkError(e);
+  } finally {
+    $("vprogress").hidden = true;
     setBusy(false);
   }
 }
@@ -429,6 +518,7 @@ function init() {
   $("connect").addEventListener("click", onConnectClick);
   $("download").addEventListener("click", onDownload);
   $("delete").addEventListener("click", onDelete);
+  $("zipPick").addEventListener("change", onVerifyZips);
   $("syncClock").addEventListener("click", onSyncClock);
   $("selAll").addEventListener("change", (e) => {
     state.selected = new Set(e.target.checked ? state.days.map((d) => d.day) : []);

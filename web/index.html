@@ -56,6 +56,17 @@
     <ul id="failed" class="failed" hidden></ul>
   </section>
 
+  <section id="verifyCard" class="card">
+    <h2>Verify saved zip</h2>
+    <p class="muted">Pick the zip file(s) you saved. Each file is read back and checked before it can be deleted from the Clip. Works without the Clip connected.</p>
+    <input type="file" id="zipPick" accept=".zip,application/zip" multiple>
+    <div id="vprogress" hidden>
+      <progress id="vbar" max="1" value="0"></progress>
+      <p id="vtext" class="muted"></p>
+    </div>
+    <ul id="verifyResults" class="failed" hidden></ul>
+  </section>
+
   <section id="deleteCard" class="card" hidden>
     <h2>Free up space on the Clip</h2>
     <p id="deleteText"></p>

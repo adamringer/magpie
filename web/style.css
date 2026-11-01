@@ -91,3 +91,4 @@ input[type="checkbox"] { width: 24px; height: 24px; flex: none; }
 progress { width: 100%; height: 14px; }
 .failed { padding-left: 20px; color: var(--danger); font-size: 0.9rem; word-break: break-all; }
 .failed li.ok { color: var(--ok); }
+input[type="file"] { width: 100%; min-height: 48px; font: inherit; }

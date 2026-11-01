@@ -1,5 +1,5 @@
 // Offline cache for the Magpie page. Bump VERSION whenever any app file changes.
-const VERSION = "1";
+const VERSION = "2";
 const CACHE = "magpie-" + VERSION;
 const ASSETS = [
   "./",
@@ -8,6 +8,7 @@ const ASSETS = [
   "proto.js",
   "webusb.js",
   "zip.js",
+  "zipread.js",
   "style.css",
   "manifest.webmanifest",
   "icons/icon-192.png",

@@ -12,6 +12,11 @@
 COUNT=${1:-10}; PERIOD=${2:-30}; DELAY=${3:-60}
 # optional 4th argument: gpsnap -w warm-up values (ms) to cycle through, e.g. "0,1000" for an A/B test
 WARMUPS=$(echo "${4:-0}" | tr ',' ' ')
+# optional 5th argument: LED d1 during each capture, 1/0 values to cycle through (default 1). 0 keeps all LEDs
+# off while the chip samples (the stock Clip's GPS was sensitive to the camera's own electronics)
+LEDS=$(echo "${5:-1}" | tr ',' ' ')
+# optional 6th argument: after capture N, flash all LEDs for 5 s and pause 60 s (cue to change the orientation)
+CUE_AT=${6:-0}
 # a newer gpsnap test build in /data wins (writes the PATH.time capture timestamp)
 GPSNAP=gpsnap; [ -x /data/gpsnap.new ] && GPSNAP=/data/gpsnap.new
 OUT=/data/gps/sky4s; mkdir -p "$OUT"; LOG=$OUT/log.txt
@@ -32,12 +37,19 @@ while [ "$i" -le "$COUNT" ]; do
 	t0=$(date +%s)
 	set -- $WARMUPS; n=$#; k=$(( (i - 1) % n + 1 )); eval "w=\${$k}"
 	wopt=""; [ "$w" != 0 ] && wopt="-w $w"   # an older gpsnap without -w still works for 0
+	set -- $LEDS; n=$#; k=$(( (i - 1) % n + 1 )); eval "ledon=\${$k}"
 	for try in 1 2; do
 		f=$OUT/$(date -u +%Y%m%d-%H%M%S).snap
-		led 'magpie:d1' 255; $GPSNAP -s 4096 -a 1 $wopt -v -o "$f" >> "$OUT/gpsnap.out" 2>&1; rc=$?; led 'magpie:d1' 0
-		echo "$(date -u '+%F %T') $i $f rc=$rc try=$try warmup=$w" >> "$LOG"; sync
+		[ "$ledon" = 1 ] && led 'magpie:d1' 255
+		$GPSNAP -s 4096 -a 1 $wopt -v -o "$f" >> "$OUT/gpsnap.out" 2>&1; rc=$?; led 'magpie:d1' 0
+		echo "$(date -u '+%F %T') $i $f rc=$rc try=$try warmup=$w led=$ledon" >> "$LOG"; sync
 		[ "$rc" = 3 ] || break
 	done
+	if [ "$CUE_AT" -gt 0 ] && [ "$i" -eq "$CUE_AT" ]; then
+		echo "$(date -u '+%F %T') cue: change orientation (60 s)" >> "$LOG"; sync
+		for n in 1 2 3 4 5; do led 'magpie:d*' 255; sleep 0.5; led 'magpie:d*' 0; sleep 0.5; done
+		sleep 55; t0=$(date +%s)
+	fi
 	i=$((i + 1))
 	if [ "$i" -le "$COUNT" ]; then
 		w=$((PERIOD - ($(date +%s) - t0))); [ "$w" -gt 0 ] && sleep "$w"

@@ -78,7 +78,7 @@ deleted, except the clock files written by SETTIME.
 | 0x0004 | HASH | JSON `{"name":…}` | JSON `{"name":…,"size":N,"sha256":"<64 hex>"}` |
 | 0x0005 | DELETE | JSON `{"files":[{"name":…,"sha256":"<hex>"},…]}` (≤ 500) | JSON `{"results":[{"name":…,"ok":true\|false,"err":"…"},…]}`: a file is deleted only if its current sha256 matches |
 | 0x0006 | TIME | empty | JSON `{"clip_utc_ms":N,"mono_ns":N,"rtt":N\|null}` (sampled when the request is processed) |
-| 0x0007 | SETTIME | JSON `{"utc_ms":N}` | JSON `{"before_ms":N,"after_ms":N,"rtc":"ok"\|"err","rtt_cal":"…"\|null}` |
+| 0x0007 | SETTIME | JSON `{"utc_ms":N}` (2020-01-01 ≤ utc_ms < 2100-01-01, else -EINVAL) | JSON `{"before_ms":N,"after_ms":N,"rtc":"ok"\|"err","rtt_cal":"…"\|null}` |
 
 - STATUS `version`: daemon version string. `rtt`: the RTT counter (see below) or null if unreadable.
   `battery_raw` from `magpie-battery` (`raw:` line), `charging` from `magpie-charge`; null if the tool fails.

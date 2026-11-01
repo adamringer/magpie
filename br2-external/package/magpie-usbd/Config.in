@@ -1,0 +1,8 @@
+config BR2_PACKAGE_MAGPIE_USBD
+	bool "magpie-usbd"
+	help
+	  FunctionFS USB daemon of the Magpie firmware: serves the
+	  photo and capture files in /data/photos, the clock and the
+	  status of the Clip to a phone over a vendor-specific bulk
+	  interface (WebUSB). Protocol: docs/PHONE_USB.md. Depends
+	  only on libc and the kernel UAPI headers.

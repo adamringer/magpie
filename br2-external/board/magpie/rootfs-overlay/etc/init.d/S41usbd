@@ -39,11 +39,18 @@ start() {
 	[ -e "$M/ep1" ] || { log "magpie-usbd wrote no descriptors within 5 s; ECM only"; return 0; }
 	u=$(cat "$G/UDC" 2> /dev/null)
 	[ -n "$u" ] && echo "" > "$G/UDC"
+	# ffs.magpie goes FIRST in c.1 (lower endpoint numbers than ECM): the UDPHS allocates endpoint FIFO RAM in
+	# endpoint order, and the host toggling the ECM data interface re-enables ECM's endpoints; with ECM below
+	# FunctionFS that let incoming network packets land in FunctionFS's IN bank (corrupted downloads, 2026-11-01)
+	E=$G/configs/c.1/ecm.usb0
+	rm -f "$E"
 	if ! ln -s "$F" "$L"; then
 		log "linking ffs.magpie failed; ECM only"
+		ln -s "$G/functions/ecm.usb0" "$E"
 		rebind "$u"
 		return 0
 	fi
+	ln -s "$G/functions/ecm.usb0" "$E" || log "relinking ecm.usb0 failed"
 	if ! rebind "$u"; then
 		log "bind with ffs.magpie failed ($u); back to ECM only"
 		rm -f "$L"

@@ -25,7 +25,7 @@ def test_tool_builds_with_werror(tmp_path):
     """magpie_usbd.c itself (needs the Linux UAPI headers, present on any Linux host)."""
     exe = tmp_path / "magpie-usbd"
     subprocess.run(
-        ["gcc", "-Wall", "-Wextra", "-Werror", "-O2", "-o", str(exe),
+        ["gcc", "-Wall", "-Wextra", "-Werror", "-O2", "-pthread", "-o", str(exe),
          str(SRC / "magpie_usbd.c"), str(SRC / "usbd_logic.c")],
         check=True, capture_output=True, text=True)
     res = subprocess.run([str(exe)], capture_output=True, text=True)

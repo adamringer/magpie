@@ -63,6 +63,9 @@ Clarifications (from the first client implementation):
 - LIST `mtime` is seconds since the epoch (UTC). HASH `size` is the file size in bytes. DELETE `err` is a short
   free-text reason (clients only rely on `ok`).
 - READ with `offset` at or past the end of the file returns status 0 and 0 bytes (EOF), not an error.
+- A client that dies mid-exchange leaves its response queued in the device. Every client must therefore, after
+  claiming the interface, read and discard IN data until a short timeout, and must skip responses whose `seq`
+  is earlier than the one it is waiting for (seq numbers start at a random value per session in the page).
 
 ## Commands
 

@@ -6,13 +6,15 @@
  *
  * The daemon writes the FunctionFS descriptors and strings to <dir>/ep0, opens <dir>/ep1 (OUT, requests) and
  * <dir>/ep2 (IN, responses) and then serves one request at a time. It never exits because the host went away:
- * endpoint errors end the current request and the daemon waits for the next ENABLE (or BIND/RESUME).
+ * endpoint errors end the current request and the daemon waits for the function to be enabled again.
+ *
+ * Threads: a second thread owns ep0 (FunctionFS events and SETUP stalls) and publishes the state under a
+ * mutex; the main thread serves requests with plain blocking reads and writes on ep1/ep2. No timers and no
+ * signals are involved, so a transfer is never interrupted: when the host disables the function the kernel
+ * completes the pending ep1/ep2 call with an error (ESHUTDOWN), which is how the main thread finds out.
  *
  * FunctionFS notes (checked against drivers/usb/gadget/function/f_fs.c of the 6.18 kernel):
- *  - Endpoint files cannot be polled, only ep0 can. A read on ep1 therefore blocks; to keep serving ep0
- *    (SETUP events must be answered or the host's control transfer times out) while idle, the wait for the
- *    first bytes of a request is interrupted by a 250 ms interval timer. The timer is only active during
- *    that wait (SIGALRM is blocked otherwise), so a transfer in progress is never interrupted.
+ *  - Endpoint files cannot be polled, only ep0 can, which is why ep0 needs its own thread.
  *  - Reads and writes are done in 16 KiB pieces (multiples of the 512-byte high-speed packet size): the
  *    kernel allocates one contiguous buffer per call and 64 KiB may not be available on a small system.
  *    Pieces of full packets are invisible on the wire; only the last one ends the USB transfer.
@@ -27,6 +29,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -36,7 +39,6 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
-#include <sys/time.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -69,17 +71,21 @@
 #define TXCAP (USBD_HDR_LEN + USBD_MAX_PAYLOAD)
 #define RES_OFF (USBD_HDR_LEN + 4) /* the result follows header and status in tx */
 #define RES_CAP (TXCAP - RES_OFF)
-#define IDLE_TICK_US 250000        /* ep0 service interval while waiting for a request */
+#define ERR_SETTLE_S 1             /* after an endpoint error, how long to wait for the DISABLE event */
+#define EP0_STACK (64 * 1024)
 
 static int g_debug;
 static const char *g_dir;
 static int g_ep0 = -1, g_ep1 = -1, g_ep2 = -1;
-static int g_up;     /* gadget bound/enabled (BIND, ENABLE) */
-static int g_susp;   /* bus suspended */
-static int g_dirty;  /* endpoint files must be reopened before the next request (after UNBIND/DISABLE/errors) */
+
+/* function state, written by the ep0 thread, read by the main thread; all under g_mu */
+static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_cv; /* CLOCK_MONOTONIC (main): SETTIME must not stretch the settle wait */
+static int g_up;       /* gadget bound/enabled (BIND, ENABLE) */
+static int g_susp;     /* bus suspended */
+static unsigned g_gen; /* bumped on every DISABLE/UNBIND: the endpoint files of an older generation are stale */
 static int g_discard; /* after a bad header: drop input until a chunk starts with a valid header */
 static volatile uint32_t *g_sysc;
-static sigset_t g_alrm;
 
 static uint8_t g_rx[RXCAP];
 static uint8_t g_tx[TXCAP];
@@ -268,133 +274,118 @@ static void stall_setup(const struct usb_ctrlrequest *s)
 	     (unsigned)s->wValue, (unsigned)s->wIndex, (unsigned)s->wLength, r);
 }
 
+static void set_state(int up, int susp, int bump)
+{
+	pthread_mutex_lock(&g_mu);
+	if (up >= 0)
+		g_up = up;
+	if (susp >= 0)
+		g_susp = susp;
+	if (bump)
+		g_gen++;
+	pthread_cond_broadcast(&g_cv);
+	pthread_mutex_unlock(&g_mu);
+}
+
 static void handle_event(const struct usb_functionfs_event *ev)
 {
 	switch (ev->type) {
 	case FUNCTIONFS_BIND:
 		dlog("event BIND");
-		g_up = 1;
+		set_state(1, -1, 0);
 		break;
 	case FUNCTIONFS_UNBIND:
 		dlog("event UNBIND");
-		g_up = 0;
-		g_dirty = 1;
+		set_state(0, -1, 1);
 		break;
 	case FUNCTIONFS_ENABLE:
 		dlog("event ENABLE");
-		g_up = 1;
+		set_state(1, -1, 0);
 		break;
 	case FUNCTIONFS_DISABLE:
 		dlog("event DISABLE");
-		g_up = 0;
-		g_dirty = 1;
+		set_state(0, -1, 1);
 		break;
 	case FUNCTIONFS_SETUP:
 		stall_setup(&ev->u.setup);
 		break;
 	case FUNCTIONFS_SUSPEND:
 		dlog("event SUSPEND");
-		g_susp = 1;
+		set_state(-1, 1, 0);
 		break;
 	case FUNCTIONFS_RESUME:
 		dlog("event RESUME");
-		g_susp = 0;
+		set_state(-1, 0, 0);
 		break;
 	default:
 		dlog("event %u", ev->type);
 	}
 }
 
-/* Waits up to timeout_ms for ep0 events (0 = just look) and handles all queued ones. Returns their count. */
-static int service_ep0(int timeout_ms)
+/* Thread A: owns ep0. Blocks in read() until FunctionFS has events and never returns. */
+static void *ep0_thread(void *arg)
 {
-	struct pollfd p = { .fd = g_ep0, .events = POLLIN };
-	int count = 0;
-
-	if (poll(&p, 1, timeout_ms) <= 0 || !(p.revents & POLLIN))
-		return 0;
+	(void)arg;
 	for (;;) {
 		struct usb_functionfs_event ev[8];
-		ssize_t n = read(g_ep0, ev, sizeof(ev));
-		ssize_t i;
+		ssize_t n = read(g_ep0, ev, sizeof(ev)), i;
 
-		if (n < 0 && errno == EINTR)
+		if (n == 0) { /* not what FunctionFS does; do not spin if it ever happens */
+			sleep(1);
 			continue;
-		if (n <= 0)
-			break;
-		for (i = 0; i < n / (ssize_t)sizeof(ev[0]); i++) {
-			handle_event(&ev[i]);
-			count++;
 		}
+		if (n < 0) {
+			if (errno == EINTR || errno == EIDRM) /* EIDRM: a pending SETUP was cancelled */
+				continue;
+			dlog("read ep0: %s", strerror(errno));
+			sleep(1); /* e.g. the function is being torn down: do not spin */
+			continue;
+		}
+		for (i = 0; i < n / (ssize_t)sizeof(ev[0]); i++)
+			handle_event(&ev[i]);
 	}
-	return count;
+	return NULL;
 }
 
-static int serving(void)
+static int serving_locked(void)
 {
 	return g_up && !g_susp;
 }
 
-/* An endpoint call failed (ESHUTDOWN, EIO, ECONNRESET, EAGAIN, ...): the request is over, never the daemon. */
-static void io_failed(const char *what)
+/*
+ * Blocks until the function is enabled and returns its generation in *gen. After an endpoint error the
+ * DISABLE event may still be on its way: first give it up to ERR_SETTLE_S to change the generation, so we
+ * do not go straight back into a dead endpoint. If it never comes (an error that is not a disconnect) we
+ * carry on with the same generation and endpoint files.
+ */
+static void wait_ready(unsigned *gen, int after_error)
 {
-	int e = errno;
+	pthread_mutex_lock(&g_mu);
+	if (after_error) {
+		struct timespec dl;
 
-	dlog("%s failed: %s", what, strerror(e));
-	/* the DISABLE/UNBIND event may follow the error by a moment; if none is queued, assume the worst */
-	if (service_ep0(0) == 0) {
-		g_up = 0;
-		g_dirty = 1;
+		clock_gettime(CLOCK_MONOTONIC, &dl);
+		dl.tv_sec += ERR_SETTLE_S;
+		while (g_gen == *gen && pthread_cond_timedwait(&g_cv, &g_mu, &dl) == 0)
+			;
 	}
-	g_discard = 0;
-}
-
-/* Called when not serving: wait for events. A silent second means events were lost; then just try again
- * (a read on a disabled endpoint blocks inside the kernel until it is enabled, so trying is harmless). */
-static void wait_serving(void)
-{
-	if (service_ep0(1000) == 0 && !serving()) {
-		dlog("no event for 1 s, trying anyway");
-		g_up = 1;
-		g_susp = 0;
-	}
+	while (!serving_locked())
+		pthread_cond_wait(&g_cv, &g_mu);
+	*gen = g_gen;
+	pthread_mutex_unlock(&g_mu);
 }
 
 /* -------------------------------------------------------------- endpoint I/O */
 
-static void on_alarm(int sig)
+/* First bytes of a request: blocks until the host sends something. -1 (errno set) on an endpoint error. */
+static ssize_t read_first(void)
 {
-	(void)sig;
-}
-
-/*
- * First bytes of a request. Returns the byte count, or -1 (errno set) on an endpoint error, or -2 if the
- * state changed while waiting (go back to the main loop).
- */
-static ssize_t read_idle(void)
-{
-	static const struct itimerval on = { { 0, IDLE_TICK_US }, { 0, IDLE_TICK_US } };
-	static const struct itimerval off;
-
 	for (;;) {
-		ssize_t n;
-		int e;
+		ssize_t n = read(g_ep1, g_rx, PKT);
 
-		service_ep0(0);
-		if (!serving() || g_dirty)
-			return -2;
-		setitimer(ITIMER_REAL, &on, NULL);
-		sigprocmask(SIG_UNBLOCK, &g_alrm, NULL);
-		n = read(g_ep1, g_rx, PKT);
-		e = errno;
-		sigprocmask(SIG_BLOCK, &g_alrm, NULL);
-		setitimer(ITIMER_REAL, &off, NULL);
-		if (n >= 0)
-			return n;
-		if (e == EINTR)
+		if (n < 0 && errno == EINTR)
 			continue;
-		errno = e;
-		return -1;
+		return n;
 	}
 }
 
@@ -922,11 +913,9 @@ enum { RX_OK, RX_BADHDR, RX_RETRY, RX_IOERR };
 static int recv_request(struct usbd_hdr *h)
 {
 	size_t have, need;
-	ssize_t n = read_idle();
+	ssize_t n = read_first();
 	int r;
 
-	if (n == -2)
-		return RX_RETRY;
 	if (n < 0)
 		return RX_IOERR;
 	if (n == 0)
@@ -972,31 +961,34 @@ static int recv_request(struct usbd_hdr *h)
 
 static void serve(void)
 {
+	unsigned gen = 0, open_gen = 0; /* the endpoint files were opened in generation open_gen */
+	int after_error = 0;
+
 	for (;;) {
 		struct usbd_hdr h;
 		size_t rl = 0;
 		int32_t status;
 		int r;
 
-		service_ep0(0);
-		if (!serving()) {
-			wait_serving();
-			continue;
-		}
-		if (g_dirty || g_ep1 < 0 || g_ep2 < 0) {
+		wait_ready(&gen, after_error);
+		after_error = 0;
+		if (gen != open_gen || g_ep1 < 0 || g_ep2 < 0) {
+			/* the function was disabled and enabled again: the old endpoint files are stale */
 			if (open_eps()) {
 				dlog("reopening the endpoints failed: %s", strerror(errno));
 				usleep(200000);
-			} else {
-				g_dirty = 0;
+				continue;
 			}
-			continue;
+			open_gen = gen;
+			g_discard = 0;
 		}
 		r = recv_request(&h);
 		if (r == RX_RETRY)
 			continue;
 		if (r == RX_IOERR) {
-			io_failed("read ep1");
+			dlog("read ep1 failed: %s", strerror(errno));
+			g_discard = 0;
+			after_error = 1;
 			continue;
 		}
 		if (r == RX_BADHDR) {
@@ -1008,8 +1000,11 @@ static void serve(void)
 			if (status)
 				rl = 0;
 		}
-		if (send_response(&h, status, rl))
-			io_failed("write ep2");
+		if (send_response(&h, status, rl)) {
+			dlog("write ep2 failed: %s", strerror(errno));
+			g_discard = 0;
+			after_error = 1;
+		}
 	}
 }
 
@@ -1022,7 +1017,8 @@ static void usage(FILE *f)
 
 int main(int argc, char **argv)
 {
-	struct sigaction sa;
+	pthread_attr_t attr;
+	pthread_t tid;
 	char path[256];
 	int i, tries;
 
@@ -1048,12 +1044,6 @@ int main(int argc, char **argv)
 	/* the helper tools are looked up through PATH, which an init script may not have set */
 	setenv("PATH", "/usr/sbin:/usr/bin:/sbin:/bin", 1);
 	signal(SIGPIPE, SIG_IGN);
-	sigemptyset(&g_alrm);
-	sigaddset(&g_alrm, SIGALRM);
-	sigprocmask(SIG_BLOCK, &g_alrm, NULL);
-	memset(&sa, 0, sizeof(sa));
-	sa.sa_handler = on_alarm; /* no SA_RESTART: the signal must interrupt the idle read */
-	sigaction(SIGALRM, &sa, NULL);
 
 	rtt_map();
 
@@ -1065,8 +1055,20 @@ int main(int argc, char **argv)
 	}
 	if (write_descriptors())
 		return EXIT_SETUP;
-	if (fcntl(g_ep0, F_SETFL, fcntl(g_ep0, F_GETFL) | O_NONBLOCK))
+	{
+		pthread_condattr_t ca;
+
+		pthread_condattr_init(&ca);
+		pthread_condattr_setclock(&ca, CLOCK_MONOTONIC);
+		pthread_cond_init(&g_cv, &ca);
+		pthread_condattr_destroy(&ca);
+	}
+	pthread_attr_init(&attr);
+	pthread_attr_setstacksize(&attr, EP0_STACK);
+	if (pthread_create(&tid, &attr, ep0_thread, NULL)) {
+		fprintf(stderr, "magpie-usbd: cannot start the ep0 thread\n");
 		return EXIT_SETUP;
+	}
 	/* writing the strings makes FunctionFS create ep1 and ep2 */
 	for (tries = 0; open_eps(); tries++) {
 		if (tries >= 50) {

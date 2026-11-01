@@ -10,7 +10,7 @@ MAGPIE_USBD_SITE_METHOD = local
 MAGPIE_USBD_LICENSE = Proprietary
 
 define MAGPIE_USBD_BUILD_CMDS
-	$(TARGET_CC) $(TARGET_CFLAGS) -Wall -Wextra -Werror -O2 $(TARGET_LDFLAGS) \
+	$(TARGET_CC) $(TARGET_CFLAGS) -Wall -Wextra -Werror -O2 -pthread $(TARGET_LDFLAGS) \
 		-o $(@D)/magpie-usbd $(@D)/magpie_usbd.c $(@D)/usbd_logic.c
 endef
 

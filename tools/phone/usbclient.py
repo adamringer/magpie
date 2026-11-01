@@ -140,6 +140,19 @@ class UsbTransport(Transport):
         self._intf, self._ep_out, self._ep_in = found
         usb.util.claim_interface(dev, self._intf.bInterfaceNumber)  # only this interface; no detach, no reset
         self._dev = dev
+        self.drain()
+
+    def drain(self, timeout_ms=200, max_bytes=1 << 20):
+        """Discard anything the device still had queued for a previous host session (a client killed mid-response
+        leaves its response in the pipe; the next client would read it first). Returns the bytes discarded."""
+        n = 0
+        while n < max_bytes:
+            try:
+                d = self._ep_in.read(16384, timeout_ms)
+            except self._usb.core.USBTimeoutError:
+                break
+            n += len(d)
+        return n
 
     def write(self, data):
         try:
@@ -208,7 +221,10 @@ class Client:
         seq = self.seq
         self.seq = (self.seq + 1) & 0xFFFFFFFF
         self.t.write(HDR.pack(MAGIC, cmd, 0, seq, len(payload)) + payload)
-        rcmd, rseq, body = self._read_exact_response()
+        for _ in range(8):  # skip stale responses (an earlier seq) left over from an aborted exchange
+            rcmd, rseq, body = self._read_exact_response()
+            if rseq == seq or not (0 < (seq - rseq) & 0xFFFFFFFF < 0x80000000):
+                break
         if rcmd != (cmd | RESP_FLAG):
             raise ProtocolError("response cmd 0x%04x, expected 0x%04x" % (rcmd, cmd | RESP_FLAG))
         if rseq != seq:

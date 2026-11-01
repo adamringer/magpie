@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#1d3557">
+<title>Magpie</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div class="title">
+    <h1>Magpie</h1>
+    <span id="conn" class="badge off">Not connected</span>
+  </div>
+  <button id="connect" class="primary">Connect</button>
+</header>
+
+<main>
+  <p id="unsupported" class="card warn" hidden>
+    This browser does not support WebUSB. Open this page in Chrome on Android (or desktop Chrome) and connect the
+    Clip with a USB cable.
+  </p>
+  <p id="message" class="card" role="status" hidden></p>
+
+  <section id="statusCard" class="card" hidden>
+    <h2>Clip</h2>
+    <dl>
+      <dt>Photos</dt><dd id="stPhotos">-</dd>
+      <dt>GPS captures</dt><dd id="stSnaps">-</dd>
+      <dt>Total size</dt><dd id="stBytes">-</dd>
+      <dt>Free space</dt><dd id="stFree">-</dd>
+      <dt>Battery</dt><dd id="stBattery">-</dd>
+      <dt>Charging</dt><dd id="stCharging">-</dd>
+      <dt>Clock offset</dt><dd id="stOffset">-</dd>
+    </dl>
+    <button id="syncClock">Set Clip clock</button>
+  </section>
+
+  <section id="filesCard" class="card" hidden>
+    <div class="row">
+      <h2>Files</h2>
+      <label class="check"><input type="checkbox" id="selAll"> <span>Select all</span></label>
+    </div>
+    <ul id="days" class="days"></ul>
+    <p id="selSummary" class="muted"></p>
+    <button id="download" class="primary">Download selected</button>
+    <div id="progress" hidden>
+      <progress id="bar" max="1" value="0"></progress>
+      <p id="progressText" class="muted"></p>
+    </div>
+    <ul id="failed" class="failed" hidden></ul>
+  </section>
+
+  <section id="deleteCard" class="card" hidden>
+    <h2>Free up space on the Clip</h2>
+    <p id="deleteText"></p>
+    <button id="delete" class="danger">Delete</button>
+    <ul id="deleteResults" class="failed" hidden></ul>
+  </section>
+</main>
+
+<footer>
+  <span id="offline" class="muted">Offline support: starting</span>
+  <button id="update" class="link" hidden>Update available, tap to reload</button>
+</footer>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

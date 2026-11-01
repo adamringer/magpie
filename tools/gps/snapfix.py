@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Snapshot GPS position fix from one Clip .snap capture (coarse-time navigation).
 
-  python3 -I snapfix.py CAPTURE.snap NAV.rnx[.gz] [--prn 26,9,3,16,27,31] [--utc 'YYYY-MM-DD HH:MM:SS'] [--out FILE]
+  python3 -I snapfix.py CAPTURE.snap brdcDDD0.YYn.gz [--prn 26,9,3,16,27,31] [--utc 'YYYY-MM-DD HH:MM:SS'] [--out FILE]
 
 Steps
  1. Measurements (drift_search.py model: format A, s = +1): per PRN a coarse eta search on the first 1024 ms, a
@@ -22,6 +22,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import drift_search as ds  # noqa: E402
+import nav  # noqa: E402
 
 C = 299792458.0
 OMEGA_E = 7.2921151467e-5
@@ -36,31 +37,8 @@ GPS_EPOCH = datetime.datetime(1980, 1, 6)
 
 # ---------------------------------------------------------------- ephemeris
 def read_nav(path):
-    op = gzip.open if path.endswith('.gz') else open
-    with op(path, 'rt') as fh:
-        lines = fh.read().splitlines()
-    i = next(k for k, l in enumerate(lines) if 'END OF HEADER' in l) + 1
-    eph = {}
-    while i < len(lines):
-        l = lines[i]
-        if not l.startswith('G'):
-            i += 1
-            continue
-        prn = int(l[1:3])
-        y, mo, d, h, mi, s = (int(l[4:8]), int(l[9:11]), int(l[12:14]), int(l[15:17]), int(l[18:20]), int(l[21:23]))
-        f = lambda t: float(t.replace('D', 'E')) if t.strip() else 0.0
-        v = [f(l[23:42]), f(l[42:61]), f(l[61:80])]
-        for k in range(1, 8):
-            ll = lines[i + k].ljust(80)
-            v += [f(ll[4:23]), f(ll[23:42]), f(ll[42:61]), f(ll[61:80])]
-        toc = (datetime.datetime(y, mo, d, h, mi, s) - GPS_EPOCH).total_seconds()
-        e = dict(toc=toc, af0=v[0], af1=v[1], af2=v[2], crs=v[4], dn=v[5], m0=v[6], cuc=v[7], ecc=v[8],
-                 cus=v[9], sqa=v[10], toe=v[11], cic=v[12], om0=v[13], cis=v[14], i0=v[15], crc=v[16],
-                 w=v[17], omd=v[18], idot=v[19], week=v[21], health=v[24], tgd=v[25])
-        e['toe_abs'] = e['week'] * 604800.0 + e['toe']
-        eph.setdefault(prn, []).append(e)
-        i += 8
-    return eph
+    """NOAA RINEX 2 GPS nav (native); RINEX 3 files are converted on the fly. See nav.py."""
+    return nav.read(path)
 
 
 def pick(eph, prn, t):

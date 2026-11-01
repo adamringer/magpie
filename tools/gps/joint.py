@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run-level solve: one shared clock offset for all captures of a run, from the captures that solve on their own.
 
-  python3 -I joint.py MEAS.jsonl NAV.rnx.gz --ms 1024 [--zmin 8] [--sigma 0.5] [--ref truth.txt] [--out FILE]
+  python3 -I joint.py MEAS.jsonl brdcDDD0.YYn.gz --ms 1024 [--zmin 8] [--sigma 0.5] [--ref truth.txt] [--out FILE]
 
 Pass 1: every capture with >= 5 PRNs, coarse-time fix (5 unknowns) -> capture-time error tc_k.
 The run's clock offset T = median(tc_k). Pass 2: every capture (>= 4 PRNs) again, with the soft prior tc = T +- sigma.

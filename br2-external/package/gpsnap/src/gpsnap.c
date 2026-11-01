@@ -31,7 +31,7 @@
 
 #include "gpsnap_logic.h"
 
-#define GPSNAP_VERSION "1.0"
+#define GPSNAP_VERSION "1.2"
 
 #define EXIT_OK 0
 #define EXIT_USAGE 1
@@ -205,11 +205,27 @@ static int out_set(unsigned bit, int val)
 }
 
 /* stock fn 0x8930: CS=1 (done by the SPI core here), RESET = 1, 0, 1 with no delays */
+static int spi_rd(void *buf, size_t len);
+
+/*
+ * RESET pulse (high, low, high). While RESET is low the chip ignores the bus, and one page-sized SPI read is
+ * done and thrown away: the first DMA-sized SPI transfer after a fast-resume wake returns a stale 32-bit word
+ * (small register reads are not affected), which shifted page 0 by one word, left the chip's page unread so
+ * DATA READY never rose again, and made every lifelog capture (one per wake) useless: chip test pattern
+ * 1 break / page-2 DATA READY timeout on the first gpsnap after each wake, clean on the second, docked or not,
+ * with or without eMMC traffic (tools/gps/sleeptest4.sh, sleeptest5.sh, 2026-11-01).
+ */
 static int reset_pulse(void)
 {
-	if (out_set(OUT_RESET, 1) || out_set(OUT_RESET, 0) || out_set(OUT_RESET, 1))
+	static uint8_t junk[GPS_PAGE_BYTES];
+
+	if (out_set(OUT_RESET, 1) || out_set(OUT_RESET, 0))
 		return -1;
-	return 0;
+	if (g.spi_fd >= 0 && spi_rd(junk, sizeof(junk))) {   /* the first pulse comes before SPI is open */
+		out_set(OUT_RESET, 1);
+		return -1;
+	}
+	return out_set(OUT_RESET, 1) ? -1 : 0;
 }
 
 static int dr_level(void)
@@ -221,8 +237,9 @@ static int dr_level(void)
 	return (int)(v.bits & 1);
 }
 
-/* Read all queued edge events. *n += count, *last_ts = timestamp of the newest one. */
-static void dr_drain(unsigned *n, uint64_t *last_ts)
+/* Read all queued edge events. Events stamped before min_ts (CLOCK_MONOTONIC ns, 0 = none) are dropped;
+ * *n += count of the others, *last_ts = timestamp of the newest one. */
+static void dr_drain(unsigned *n, uint64_t *last_ts, int64_t min_ts)
 {
 	struct gpio_v2_line_event ev[8];
 
@@ -235,18 +252,27 @@ static void dr_drain(unsigned *n, uint64_t *last_ts)
 		k = (size_t)r / sizeof(ev[0]);
 		if (k == 0)
 			return;
-		*n += (unsigned)k;
-		*last_ts = ev[k - 1].timestamp_ns;
+		for (size_t i = 0; i < k; i++) {
+			if ((int64_t)ev[i].timestamp_ns < min_ts)
+				continue;
+			*n += 1;
+			*last_ts = ev[i].timestamp_ns;
+		}
 	}
 }
 
 /*
  * Wait for DATA READY (stock fn 0x9928: select() on the gpio fd, 100 ms; ready when the line is low).
- * Go immediately if the line is already low, else wait for the falling edge. Events seen are
- * returned in *n (callers use more than one as an overrun indicator).
- * Returns 0, -ETIMEDOUT, or -EINTR (signal).
+ * not_before_ns = 0 (register reads): ready on any edge or while the line is low, as stock. Otherwise (pages):
+ * ready only on a falling edge stamped at or after not_before_ns (CLOCK_MONOTONIC); the level is not used, so a
+ * lost edge shows as a timeout instead of a silently shifted page. The page loop passes "previous page edge +
+ * 12 ms" (pages come every 16 ms): right after a fast resume the chip gives an extra DATA READY pulse just after
+ * the capture starts, and the line can still be low after a quick page read, so stock's rules read a page
+ * early (test pattern: 1 break; GPS: the stream shifted by part of a 32-bit word, a 64 kHz comb from the broken
+ * word unpacking, no satellites). Events seen are returned in *n (callers use more than one as an overrun
+ * indicator). Returns 0, -ETIMEDOUT, or -EINTR (signal).
  */
-static int wait_dr(int timeout_ms, unsigned *n, uint64_t *last_ts)
+static int wait_dr(int timeout_ms, unsigned *n, uint64_t *last_ts, int64_t not_before_ns)
 {
 	int64_t end = now_ns() + (int64_t)timeout_ms * 1000000;
 
@@ -257,8 +283,8 @@ static int wait_dr(int timeout_ms, unsigned *n, uint64_t *last_ts)
 		int64_t left;
 		int r;
 
-		dr_drain(n, last_ts);
-		if (dr_level() == 0 || *n > 0)
+		dr_drain(n, last_ts, not_before_ns);
+		if (*n > 0 || (!not_before_ns && dr_level() == 0))
 			return 0;
 		if (g_stop)
 			return -EINTR;
@@ -276,7 +302,7 @@ static void dr_flush(void)
 	unsigned n = 0;
 	uint64_t ts = 0;
 
-	dr_drain(&n, &ts);
+	dr_drain(&n, &ts, 0);
 }
 
 /* ----------------------------------------------------------------- SPI */
@@ -360,7 +386,7 @@ static int reg_read(uint8_t reg, uint32_t *val)
 	gps_cmd_read(reg, cmd);
 	if (spi_wr(cmd, sizeof(cmd)))
 		return -1;
-	r = wait_dr(DR_TIMEOUT_MS, &n, &ts);
+	r = wait_dr(DR_TIMEOUT_MS, &n, &ts, 0);
 	if (r) {
 		err("register 0x%02x read: %s", reg, r == -ETIMEDOUT ? "DATA READY timeout" : "interrupted");
 		return -1;
@@ -611,11 +637,14 @@ struct stats {
 static int capture(uint8_t *buf, unsigned pages, struct stats *st)
 {
 	unsigned p;
+	int64_t start = now_ns();
 
 	for (p = 0; p < pages; p++) {
 		unsigned n;
 		uint64_t ts;
-		int r = wait_dr(DR_TIMEOUT_MS, &n, &ts);
+		/* nothing counts as the next page until 12 ms after the previous one (or the start); pages are 16 ms */
+		int64_t prev = !p ? start : st->edge[p - 1] ? (int64_t)st->edge[p - 1] : st->t[p - 1];
+		int r = wait_dr(DR_TIMEOUT_MS, &n, &ts, prev + 12 * 1000000LL);
 
 		if (r == -EINTR || g_stop) {
 			err("interrupted after %u of %u pages", p, pages);

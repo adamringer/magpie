@@ -233,6 +233,11 @@ def measure(raw, prns, zmin, coarse=None):
             f2 -= 1000.0
         snr2 = b / np.median(W)
         dopp = f0 + f2 / 2.0
+        # squaring away the data bits makes f2/2 ambiguous by 500 Hz, and f0 (from the code slide) can be > 250 Hz
+        # off on short captures: pick the alias that keeps 20 ms coherent sums coherent (aided.search, lag fixed)
+        import aided
+        dopp = max((dopp + k * 500.0 for k in (-1, 0, 1)),
+                   key=lambda f: aided.search(F0, F1, nb, prn, f, lag / ds.FS, fwin=5.0, lagwin=1)['z'])
         out[prn] = dict(z=float(zz), eta=float(eta), dopp=float(dopp), tau=float(lag / ds.FS))
         print('PRN %2d: z %6.1f  Doppler %+9.2f Hz (code-slide estimate %+8.1f, carrier peak/median %.0f)  '
               'code phase %8.3f samples (%.6f ms)' % (prn, zz, dopp, f0, snr2, lag, lag / ds.FS * 1e3), flush=True)

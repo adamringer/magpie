@@ -1,5 +1,5 @@
 // Offline cache for the Magpie page. Bump VERSION whenever any app file changes.
-const VERSION = "2";
+const VERSION = "3";
 const CACHE = "magpie-" + VERSION;
 const ASSETS = [
   "./",

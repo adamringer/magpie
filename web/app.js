@@ -17,6 +17,7 @@ const state = {
   files: [],
   days: [],
   selected: new Set(), // days
+  savedNames: [], // zip names saved by the current download (for the completion banner)
   verified: new Map(), // name -> {name, sha256, size, clipChecked}: passed zip verification, deletable from the Clip
 };
 
@@ -32,6 +33,29 @@ function fmtBytes(n) {
 
 function fmtDay(d) {
   return `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}`;
+}
+
+// Completion banner: hard to miss (big tick, vibration, title), cleared when the next download starts.
+function showDone(info) {
+  const el = $("done");
+  if (!info) {
+    el.hidden = true;
+    document.title = "Magpie";
+    return;
+  }
+  const mb = (info.bytes / 1048576).toFixed(1);
+  el.textContent = "";
+  const h = Object.assign(document.createElement("strong"), { textContent: "\u2714 Download complete" });
+  const p1 = Object.assign(document.createElement("p"), {
+    textContent: `${info.files} files, ${mb} MB, saved as: ${info.names.join(", ")}` + (info.failed ? ` (${info.failed} failed, see below)` : ""),
+  });
+  const p2 = Object.assign(document.createElement("p"), { textContent: "Next: Verify saved zip, then Delete becomes available." });
+  el.append(h, p1, p2);
+  el.classList.toggle("warn", info.failed > 0);
+  el.hidden = false;
+  document.title = "\u2714 Magpie";
+  try { if (navigator.vibrate) navigator.vibrate([150, 80, 150]); } catch (_) { /* not allowed: ignore */ }
+  el.scrollIntoView({ behavior: "smooth", block: "center" });
 }
 
 function say(text, warn = false) {
@@ -255,6 +279,7 @@ function flushZip(batch) {
   zip.addFile("SHA256SUMS", enc.encode(sums));
   const name = `magpie_${stemOf(sorted[0].name)}_to_${stemOf(sorted[sorted.length - 1].name)}.zip`;
   saveZip(zip.finish(), name);
+  state.savedNames.push(name);
   return sorted.length;
 }
 
@@ -271,6 +296,8 @@ async function onDownload() {
   let savedZips = 0;
   const t0 = performance.now();
   setBusy(true);
+  state.savedNames = [];
+  showDone(null);
   $("progress").hidden = false;
   $("failed").hidden = true;
   $("failed").textContent = "";
@@ -331,6 +358,7 @@ async function onDownload() {
     else await teardown("Download stopped by a USB error: " + (aborted.message || aborted) + "." + saved + " Reconnect to start again.");
   } else {
     say(`Downloaded ${doneFiles - failed.length} of ${files.length} files in ${savedZips} zip(s).` + (savedZips ? " Saved. To delete these from the Clip, tap Verify saved zip and pick the file(s)." : ""), failed.length > 0);
+    if (savedZips) showDone({ files: doneFiles - failed.length, bytes: doneBytes, names: state.savedNames, failed: failed.length });
   }
   if (failed.length) {
     const ul = $("failed");

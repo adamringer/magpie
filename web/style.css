@@ -92,3 +92,11 @@ progress { width: 100%; height: 14px; }
 .failed { padding-left: 20px; color: var(--danger); font-size: 0.9rem; word-break: break-all; }
 .failed li.ok { color: var(--ok); }
 input[type="file"] { width: 100%; min-height: 48px; font: inherit; }
+
+/* download completion banner */
+.done { margin: 12px 0; padding: 14px 16px; border-radius: 12px; border: 2px solid #2e7d32; background: rgba(46, 125, 50, 0.12); }
+.done strong { display: block; font-size: 1.25rem; color: #2e7d32; margin-bottom: 4px; }
+.done p { margin: 4px 0; overflow-wrap: anywhere; }
+.done.warn { border-color: #b26a00; background: rgba(178, 106, 0, 0.12); }
+.done.warn strong { color: #b26a00; }
+@media (prefers-color-scheme: dark) { .done strong { color: #81c784; } .done.warn strong { color: #ffb74d; } }

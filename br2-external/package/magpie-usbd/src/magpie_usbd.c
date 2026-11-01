@@ -292,19 +292,19 @@ static void handle_event(const struct usb_functionfs_event *ev)
 	switch (ev->type) {
 	case FUNCTIONFS_BIND:
 		dlog("event BIND");
-		set_state(1, -1, 0);
+		set_state(1, 0, 0);
 		break;
 	case FUNCTIONFS_UNBIND:
 		dlog("event UNBIND");
-		set_state(0, -1, 1);
+		set_state(0, 0, 1);
 		break;
 	case FUNCTIONFS_ENABLE:
 		dlog("event ENABLE");
-		set_state(1, -1, 0);
+		set_state(1, 0, 0);
 		break;
 	case FUNCTIONFS_DISABLE:
 		dlog("event DISABLE");
-		set_state(0, -1, 1);
+		set_state(0, 0, 1);
 		break;
 	case FUNCTIONFS_SETUP:
 		stall_setup(&ev->u.setup);
@@ -347,9 +347,15 @@ static void *ep0_thread(void *arg)
 	return NULL;
 }
 
+/*
+ * Serving depends on ENABLE only, not on SUSPEND/RESUME: a physical unplug delivers SUSPEND then DISABLE, and
+ * the next plug-in delivers ENABLE without any RESUME, so gating on the suspend flag left the daemon deaf
+ * after every unplug (phone test 2026-11-01). A read pending on a suspended bus simply waits. Every
+ * BIND/ENABLE/DISABLE/UNBIND also clears the flag, which is kept for the debug log only.
+ */
 static int serving_locked(void)
 {
-	return g_up && !g_susp;
+	return g_up;
 }
 
 /*

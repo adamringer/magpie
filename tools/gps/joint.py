@@ -63,6 +63,7 @@ def main():
     ap.add_argument('--sigma', type=float, default=0.5)
     ap.add_argument('--ref', default=None)
     ap.add_argument('--out', default=None)
+    ap.add_argument('--kml', default=None, help='write the run-level fixes (and --ref, median) as KML placemarks')
     ap.add_argument('--no-iono', action='store_true', help='no Klobuchar ionosphere correction (for comparison)')
     ap.add_argument('--seed-file', default=None, help='"lat lon" file (last known position) used instead of the Doppler fix')
     a = ap.parse_args()
@@ -106,6 +107,19 @@ def main():
             return '%4.0f m %s (rms %5.1f, h %5.0f, tc %+.2f)' % (d, 'to ref' if ref else 'to median', v['rms'], v['h'], v['tc'])
         lines.append('  %s  %d PRN | alone: %-48s | with T: %s' % (name[9:15], len(caps[name][1]), fmt(v1), fmt(v2)))
     print('\n'.join(lines))
+    if a.kml:
+        import kml
+        fixes = [(name[9:15], v['lat'], v['lon'], '%d ms, %d PRN, rms %.1f m, tc %+.2f s' % (
+            a.ms, len(caps[name][1]), v['rms'], v['tc']), 'fix') for name, v in sorted(p2.items()) if v and v['rms'] < 50]
+        folders = {'fixes %d ms' % a.ms: fixes}
+        extra = []
+        if med:
+            extra.append(('median of %d fixes' % len(good), med[0], med[1], '', 'median'))
+        if ref:
+            extra.append(('reference', ref[0], ref[1], a.ref, 'ref'))
+        if extra:
+            folders['reference'] = extra
+        kml.write(a.kml, folders, title='magpie %d ms' % a.ms)
     if a.out:
         with open(a.out, 'a') as fh:
             fh.write('\n'.join(lines) + '\n\n')

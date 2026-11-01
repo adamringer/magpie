@@ -102,6 +102,11 @@ CONFIG_CONFIGFS_FS=y
 CONFIG_USB_CONFIGFS=y
 CONFIG_USB_CONFIGFS_ECM=y
 CONFIG_USB_CONFIGFS_MASS_STORAGE=y
+# FunctionFS for the phone download interface (docs/PHONE_USB.md) as a module: the legacy g_ffs option is the
+# only tristate that builds usb_f_fs.ko (CONFIG_USB_CONFIGFS_F_FS is a bool and would build it in); the configfs
+# gadget uses usb_f_fs.ko directly, g_ffs.ko itself is never loaded.
+CONFIG_USB_FUNCTIONFS=m
+CONFIG_USB_FUNCTIONFS_GENERIC=y
 
 # --- GPS access (ACLYS on SPI1) ---
 CONFIG_SPI=y

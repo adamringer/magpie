@@ -1,0 +1,76 @@
+#!/bin/sh
+# Phone download interface (docs/PHONE_USB.md): add a FunctionFS function served by magpie-usbd to the USB
+# gadget that S03usbnet built, next to the ECM network function. Order: load usb_f_fs, create ffs.magpie,
+# mount it, start magpie-usbd, wait until it has written its descriptors (ep1 appears), then unbind the UDC,
+# link the function into c.1 and rebind. Any failure leaves (or restores) the ECM-only gadget, so the laptop
+# link never depends on the daemon. Runs after S40data (the daemon serves /data/photos). Always exits 0.
+# Test overrides (to run from /data before a flash): USBD_BIN, FFS_KO (insmod this file instead of modprobe).
+log() { echo "S41usbd: $*" > /dev/kmsg 2>/dev/null; }
+
+G=/sys/kernel/config/usb_gadget/magpie
+F=$G/functions/ffs.magpie
+L=$G/configs/c.1/ffs.magpie
+M=/dev/ffs-magpie
+PID=/run/magpie-usbd.pid
+BIN=${USBD_BIN:-/usr/sbin/magpie-usbd}
+
+rebind() { # UDC name: (re)bind, empty = leave unbound
+	[ -n "$1" ] || return 0
+	echo "$1" > "$G/UDC" 2> /dev/null
+}
+
+start() {
+	[ -d "$G" ] || { log "no gadget (S03usbnet failed?)"; return 0; }
+	[ -e "$L" ] && { log "already linked"; return 0; }
+	if [ -n "${FFS_KO:-}" ]; then
+		grep -q '^usb_f_fs ' /proc/modules || insmod "$FFS_KO" || { log "insmod $FFS_KO failed"; return 0; }
+	else
+		modprobe usb_f_fs || { log "modprobe usb_f_fs failed"; return 0; }
+	fi
+	mkdir -p "$F" || { log "mkdir $F failed"; return 0; }
+	mkdir -p "$M"
+	grep -q " $M functionfs " /proc/mounts || mount -t functionfs magpie "$M" || { log "mount $M failed"; return 0; }
+	if ! start-stop-daemon -S -q -b -m -p "$PID" -x "$BIN" -- "$M"; then
+		log "starting $BIN failed"
+		return 0
+	fi
+	i=0
+	while [ ! -e "$M/ep1" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+	[ -e "$M/ep1" ] || { log "magpie-usbd wrote no descriptors within 5 s; ECM only"; return 0; }
+	u=$(cat "$G/UDC" 2> /dev/null)
+	[ -n "$u" ] && echo "" > "$G/UDC"
+	if ! ln -s "$F" "$L"; then
+		log "linking ffs.magpie failed; ECM only"
+		rebind "$u"
+		return 0
+	fi
+	if ! rebind "$u"; then
+		log "bind with ffs.magpie failed ($u); back to ECM only"
+		rm -f "$L"
+		rebind "$u"
+		return 0
+	fi
+	log "ffs.magpie linked (UDC '${u:-unbound}'), magpie-usbd pid $(cat "$PID" 2> /dev/null)"
+}
+
+stop() {
+	u=$(cat "$G/UDC" 2> /dev/null)
+	if [ -e "$L" ]; then
+		[ -n "$u" ] && echo "" > "$G/UDC"
+		rm -f "$L"
+		rebind "$u"
+	fi
+	start-stop-daemon -K -q -p "$PID" 2> /dev/null
+	rm -f "$PID"
+	umount "$M" 2> /dev/null
+	rmdir "$F" 2> /dev/null
+	log "stopped"
+}
+
+case "$1" in
+start) log start; start ;;
+stop) stop ;;
+restart) stop; start ;;
+*) echo "usage: $0 start|stop|restart" ;;
+esac
+exit 0

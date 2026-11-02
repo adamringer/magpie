@@ -24,12 +24,26 @@ WHITE = (0.98, 0.98, 0.96)
 TILE = (0.93, 0.95, 0.97)
 
 
-def outlined(cr, fill, width=12):
+HALO = {"on": False, "extra": 18}  # halo pass: draw everything white and thicker (a sticker border for dark pages)
+
+
+def ink(cr, rgb, alpha=1.0):
+    if HALO["on"]:
+        cr.set_source_rgb(1, 1, 1)
+    else:
+        cr.set_source_rgba(*rgb, alpha)
+
+
+def width(w):
+    return w + HALO["extra"] if HALO["on"] else w
+
+
+def outlined(cr, fill, w=12):
     """fill the current path, then stroke it with the cartoon outline"""
-    cr.set_source_rgb(*fill)
+    ink(cr, fill)
     cr.fill_preserve()
-    cr.set_source_rgb(*LINE)
-    cr.set_line_width(width)
+    ink(cr, LINE)
+    cr.set_line_width(width(w))
     cr.set_line_join(cairo.LINE_JOIN_ROUND)
     cr.stroke()
 
@@ -52,8 +66,8 @@ def bird(cr):
     cr.close_path()
     outlined(cr, TAIL)
     # feet
-    cr.set_source_rgb(*LINE)
-    cr.set_line_width(12)
+    ink(cr, LINE)
+    cr.set_line_width(width(12))
     cr.set_line_cap(cairo.LINE_CAP_ROUND)
     for x in (238, 290):
         cr.move_to(x, 380)
@@ -69,12 +83,12 @@ def bird(cr):
     blob(cr, 262, 310, 118, 92)
     cr.clip()
     blob(cr, 300, 352, 100, 70)
-    cr.set_source_rgb(*WHITE)
+    ink(cr, WHITE)
     cr.fill()
     cr.restore()
     blob(cr, 262, 310, 118, 92)                         # re-stroke the body outline over the belly
-    cr.set_source_rgb(*LINE)
-    cr.set_line_width(12)
+    ink(cr, LINE)
+    cr.set_line_width(width(12))
     cr.stroke()
     # wing with a white shoulder stripe
     cr.move_to(196, 268)
@@ -86,7 +100,7 @@ def bird(cr):
     cr.curve_to(236, 246, 272, 248, 284, 268)
     cr.curve_to(262, 258, 236, 258, 214, 262)
     cr.close_path()
-    cr.set_source_rgb(*WHITE)
+    ink(cr, WHITE)
     cr.fill()
     # beak: short and rounded
     cr.move_to(392, 168)
@@ -98,8 +112,8 @@ def bird(cr):
     cr.arc(330, 186, 92, 0, 2 * math.pi)
     outlined(cr, BODY)
     cr.arc(298, 136, 26, math.radians(200), math.radians(280))   # shine on the head
-    cr.set_source_rgba(1, 1, 1, 0.55)
-    cr.set_line_width(9)
+    ink(cr, (1, 1, 1), 0.55)
+    cr.set_line_width(width(9))
     cr.stroke()
     lens(cr, 346, 180, 50)
 
@@ -113,22 +127,29 @@ def lens(cr, x, y, r):
     g.add_color_stop_rgb(0, 0.36, 0.52, 0.95)
     g.add_color_stop_rgb(0.6, 0.20, 0.18, 0.55)
     g.add_color_stop_rgb(1, 0.08, 0.08, 0.20)
-    cr.set_source(g)
+    if HALO["on"]:
+        ink(cr, WHITE)
+    else:
+        cr.set_source(g)
     cr.fill()
     cr.arc(x, y, r * 0.30, 0, 2 * math.pi)                # pupil-like centre
-    cr.set_source_rgba(0.05, 0.05, 0.12, 0.85)
+    ink(cr, (0.05, 0.05, 0.12), 0.85)
     cr.fill()
     cr.arc(x - r * 0.28, y - r * 0.30, r * 0.17, 0, 2 * math.pi)   # big glint
-    cr.set_source_rgb(1, 1, 1)
+    ink(cr, (1, 1, 1))
     cr.fill()
     cr.arc(x + r * 0.26, y + r * 0.22, r * 0.08, 0, 2 * math.pi)
-    cr.set_source_rgba(1, 1, 1, 0.7)
+    ink(cr, (1, 1, 1), 0.7)
     cr.fill()
 
 
 def draw_transparent(surface, size):
+    """transparent background: a white halo pass first so the dark outlines and feet also show on dark pages"""
     cr = cairo.Context(surface)
     cr.scale(size / 512.0, size / 512.0)
+    HALO["on"] = True
+    bird(cr)
+    HALO["on"] = False
     bird(cr)
     return cr
 

@@ -1,6 +1,6 @@
 # Phone download over WebUSB: USB interface and protocol (v1)
 
-Design (agreed with the user 2026-11-01): Chrome on Android talks to the Clip directly over USB (WebUSB) from a
+Design: Chrome on Android talks to the Clip directly over USB (WebUSB) from a
 web page; no USB networking (Android 17 does not take the Clip's CDC-ECM link as Ethernet) and no app. The same
 interface is driven from the laptop by `tools/phone/usbclient.py` for testing.
 

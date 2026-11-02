@@ -25,6 +25,12 @@ tools/tapscope/clicktest
 # once reviewed, by adding a !/docs/NAME.md line below.
 /docs/*
 !/docs/PHONE_USB.md
+!/docs/DESIGN_OVERVIEW.md
+!/docs/GPS_PROCESSING.md
+!/docs/img/
+/docs/img/*
+!/docs/img/gps/
+!/docs/img/test_pads.png
 
 # Local-only tools: one-off experiments and diagnostics kept on disk but not in the repo (2026-11-01 cleanup)
 /tools/fastresume/

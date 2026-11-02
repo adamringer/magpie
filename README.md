@@ -431,3 +431,8 @@ root-owned, passwordless wrappers for the flash script and the bridge on that ma
 
 Scripts on the host run with `.venv/bin/python -I` (add `-W ignore` for the telnet ones: `telnetlib` is deprecated
 but still present in Python 3.12, which the project pins).
+
+## Licence
+
+MIT, see [LICENSE](LICENSE). The Linux kernel patches in `br2-external/patches/linux/` modify the Linux kernel and are
+therefore GPL-2.0, like the kernel itself.

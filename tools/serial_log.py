@@ -26,7 +26,7 @@ def main():
 
     port = args.port or next(iter(sorted(glob.glob("/dev/ttyUSB*")) + sorted(glob.glob("/dev/ttyACM*"))), None)
     if not port:
-        sys.exit("error: no /dev/ttyUSB* or /dev/ttyACM* (is the adapter connected to the VM?)")
+        sys.exit("error: no /dev/ttyUSB* or /dev/ttyACM* (is the USB serial adapter plugged in?)")
     total = 0
     end = time.time() + args.seconds
     with serial.Serial(port, args.baud, timeout=0.5) as ser, open(args.out, "wb") as f:

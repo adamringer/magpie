@@ -96,8 +96,8 @@ These speak the Clip's vendor-specific USB data interface (protocol v1, describe
   reference copies fetched over FTP. Bad copies are kept as `OUTDIR/<name>.bad`, with the first difference described.
   `/usr/bin/python3 -I tools/phone/getdiag.py REFDIR OUTDIR [ROUNDS]`
 - `phone/stress.sh` - test helper: runs `getdiag.py` while FTP uploads flood the network link, to check phone-interface
-  downloads stay intact. **It repeatedly uploads a 2 MB junk file to the Clip's `/tmp`.** Run from the repo root.
-  `tools/phone/stress.sh [ROUNDS] [REFDIR] [OUTDIR]`
+  downloads stay intact. **It repeatedly uploads a 2 MB junk file to the Clip's `/tmp`** (deleted at the end).
+  `tools/phone/stress.sh ROUNDS REFDIR OUTDIR`
 
 ## GPS
 

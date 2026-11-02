@@ -34,7 +34,8 @@ def t0_of(snap):
     for l in open(snap + '.time'):
         k, _, v = l.strip().partition('=')
         if k == 'first_page_utc':
-            utc = datetime.datetime.strptime(v.rstrip('Z'), '%Y-%m-%dT%H:%M:%S.%f') - datetime.timedelta(milliseconds=16)
+            utc = datetime.datetime.strptime(v.rstrip('Z'), '%Y-%m-%dT%H:%M:%S.%f')
+            utc -= datetime.timedelta(milliseconds=16)        # stamp is page 0's end, as in snapfix.py
             return (utc - GPS_EPOCH).total_seconds() + sf.GPS_UTC
     raise SystemExit('no first_page_utc in %s.time' % snap)
 

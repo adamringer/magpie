@@ -25,3 +25,25 @@ tools/tapscope/clicktest
 # once reviewed, by adding a !/docs/NAME.md line below.
 /docs/*
 !/docs/PHONE_USB.md
+
+# Local-only tools: one-off experiments and diagnostics kept on disk but not in the repo (2026-11-01 cleanup)
+/tools/fastresume/
+/tools/tapscope/
+/tools/tapprobe.sh
+/tools/magpie-camid.sh
+/tools/scsi_eject.py
+/tools/gps/sleeptest*.sh
+/tools/gps/combtest*.sh
+/tools/gps/drtest.sh
+/tools/phone/README.md
+/tools/phone/start.sh
+/tools/phone/stop.sh
+/tools/phone/udhcpd.conf
+/tools/phone/www/
+/tools/phone/netbb.config
+/tools/phone/mactest.sh
+/tools/phone/macwrite_check.sh
+/tools/phone/run_s41.sh
+/tools/phone/readdiag.py
+/tools/phone/restart_usbd_debug.sh
+/tools/phone/diag_start.sh

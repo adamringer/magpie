@@ -46,7 +46,7 @@
 		/*
 		 * First RAM page, kept out of the kernel's use: at91bootstrap's SDRAM init
 		 * writes to 0x20000048 on every boot, including a warm wake, and the
-		 * fast-resume entry (0x2BEDF00D word + stub, tools/fastresume/) lives here.
+		 * fast-resume entry (0x2BEDF00D word + stub) lives here.
 		 */
 		fastresume@20000000 {
 			reg = <0x20000000 0x1000>;

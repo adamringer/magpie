@@ -213,7 +213,7 @@ static int spi_rd(void *buf, size_t len);
  * (small register reads are not affected), which shifted page 0 by one word, left the chip's page unread so
  * DATA READY never rose again, and made every lifelog capture (one per wake) useless: chip test pattern
  * 1 break / page-2 DATA READY timeout on the first gpsnap after each wake, clean on the second, docked or not,
- * with or without eMMC traffic (tools/gps/sleeptest4.sh, sleeptest5.sh, 2026-11-01).
+ * with or without eMMC traffic (docked sleep/wake tests with the chip test pattern, 2026-11-01).
  */
 static int reset_pulse(void)
 {

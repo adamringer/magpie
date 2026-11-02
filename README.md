@@ -5,6 +5,11 @@ camera, GPS, accelerometer). The vendor shut down its service, and the original 
 positions and photo upload. magpie replaces the software on the camera and leaves the original bootloaders alone.
 The camera keeps taking pictures, and the positions can be worked out on your own computer.
 
+> **Built with AI, use at your own risk.** Most of the code and documentation in this project was written by an AI
+> assistant (Anthropic's Claude) under the author's direction, and tested on one device. It is provided **as is,
+> without any warranty**. Installing it modifies the firmware of your camera. The author is **not responsible** for
+> anything that goes wrong if you use it, including a camera that no longer works, lost photos or lost data.
+
 ## What works today
 
 - **Lifelog photos** every 30 seconds while the Clip is not on a charger, 2592x1944 JPEG, named by UTC time.
@@ -20,8 +25,9 @@ The camera keeps taking pictures, and the positions can be worked out on your ow
 
 ## Status and warnings
 
-magpie is experimental. It was developed and tested on one Clip 1 unit (board revision R1D as reported by the
-original firmware). Other units are untested.
+magpie is experimental and was written largely by an AI assistant (see the note at the top); you use it at your
+own risk. It was developed and tested on one Clip 1 unit (board revision R1D as reported by the original
+firmware). Other units are untested.
 
 - You do not need to open the Clip to install it. Installing writes the kernel and the root filesystem on the
   internal flash (eMMC partitions 1 and 2). The photo partition and the two bootloaders in the SPI flash are not

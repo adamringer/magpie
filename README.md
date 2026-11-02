@@ -406,6 +406,7 @@ Notes:
 | [docs/DESIGN_OVERVIEW.md](docs/DESIGN_OVERVIEW.md) | how magpie works: hardware, boot, lifelog cycle, sleep, GPS capture, time, USB |
 | [docs/PHONE_USB.md](docs/PHONE_USB.md) | the USB interface and protocol used by the phone web app |
 | [docs/GPS_PROCESSING.md](docs/GPS_PROCESSING.md) | from 512 ms of raw bits to a position |
+| [tools/README.md](tools/README.md) | every host-side tool: link, flashing and recovery, debug, phone, GPS |
 
 ## For developers
 

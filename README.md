@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/img/logo.svg" alt="magpie logo: a cartoon magpie whose eye is a camera lens" width="200"></p>
+
 # magpie
 
 Open firmware for the Narrative Clip 1, the small wearable lifelogging camera from 2013 (Atmel AT91SAM9G25, 5 MP

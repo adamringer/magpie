@@ -100,3 +100,4 @@ input[type="file"] { width: 100%; min-height: 48px; font: inherit; }
 .done.warn { border-color: #b26a00; background: rgba(178, 106, 0, 0.12); }
 .done.warn strong { color: #b26a00; }
 @media (prefers-color-scheme: dark) { .done strong { color: #81c784; } .done.warn strong { color: #ffb74d; } }
+.logo { vertical-align: middle; margin-right: 6px; }

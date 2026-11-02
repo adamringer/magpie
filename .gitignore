@@ -31,6 +31,8 @@ tools/tapscope/clicktest
 /docs/img/*
 !/docs/img/gps/
 !/docs/img/test_pads.png
+!/docs/img/logo.svg
+!/docs/img/logo.png
 
 # Local-only tools: one-off experiments and diagnostics kept on disk but not in the repo (2026-11-01 cleanup)
 /tools/fastresume/

@@ -56,6 +56,8 @@
 : "${RTC_DIR:=/sys/class/rtc/rtc0}"
 : "${KMSG:=/dev/kmsg}"
 : "${PROC_UPTIME:=/proc/uptime}"
+: "${MEMINFO:=/proc/meminfo}"
+: "${SYS_MODULE_DIR:=/sys/module}"
 : "${VIDEO_NODE:=/dev/video0}"
 : "${SPI_NODE:=/dev/spidev1.1}"
 : "${DEVMEM:=devmem}"
@@ -110,6 +112,16 @@ ll_rotate() {
 	_s=$(wc -c < "$1" 2> /dev/null)
 	case "$_s" in '' | *[!0-9]*) return 0 ;; esac
 	[ "$_s" -ge "$LOG_MAX" ] && mv -f "$1" "$1.1" 2> /dev/null
+	return 0
+}
+
+# ll_strip_nul FILE: remove NUL bytes (ext4 leaves a zero-filled tail when the power fails during an append).
+ll_strip_nul() {
+	[ -f "$1" ] || return 0
+	_a=$(wc -c < "$1" 2> /dev/null)
+	_b=$(tr -d '\000' < "$1" 2> /dev/null | wc -c)
+	[ -n "$_a" ] && [ -n "$_b" ] && [ "$_a" != "$_b" ] || return 0
+	tr -d '\000' < "$1" > "$1.nul" 2> /dev/null && mv -f "$1.nul" "$1" 2> /dev/null
 	return 0
 }
 

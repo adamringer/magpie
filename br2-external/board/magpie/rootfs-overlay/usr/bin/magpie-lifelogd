@@ -426,6 +426,16 @@ run_cycle() {
 			# No page-cache drop here: it forced eMMC page-ins while the camera streams, which after a
 			# fast resume fail (backlog). snap needs 2 x 2 MiB of CMA (12 MiB area) and mlocks itself.
 			run_logged "snap" with_timeout "$SNAP_TIMEOUT" $SNAP_CMD -o "$photo" && photo_ok=1
+			case "$photo_ok$_out" in 0*"Out of memory"*)
+				# No contiguous CMA block for the buffers, probably ext4/jbd2 pages pinned in the CMA area.
+				# sync commits the journal and frees them; a cache drop would force eMMC page-ins (see above).
+				ll_log "snap: no CMA ($(grep -E '^Cma(Total|Free)' "$MEMINFO" 2> /dev/null | tr -s ' \n' ' ')); kernel: $($DMESG_CMD 2> /dev/null | tail -n 3 | tr '\n' ' ')"
+				sync
+				$SLEEP_CMD 1
+				run_logged "snap (retry)" with_timeout "$SNAP_TIMEOUT" $SNAP_CMD -o "$photo" && photo_ok=1
+				[ "$photo_ok" = 1 ] && ll_log "snap retry after sync ok"
+				;;
+			esac
 			photo_bytes=$(wc -c < "$photo" 2> /dev/null)
 			case "$photo_bytes" in '' | *[!0-9]*) photo_bytes=0 ;; esac
 			[ "$photo_bytes" -gt 0 ] || photo_ok=0
@@ -512,6 +522,10 @@ run_cycle() {
 
 # ---- main loop ----
 main() {
+	if ll_ensure_dir; then
+		ll_strip_nul "$LL_DIR/log.csv"
+		ll_strip_nul "$LL_DIR/daemon.log"
+	fi
 	WAKE_SRC=$(wake_source)
 	[ -n "$WAKE_SRC" ] || WAKE_SRC=none
 	ll_log "start: wake '$WAKE_SRC', interval ${INTERVAL}s, gps $GPS, faceDown axis '${FACEDOWN_AXIS:-off}', accel wake $ACCEL_WAKE"

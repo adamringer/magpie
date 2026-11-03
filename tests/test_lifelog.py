@@ -36,6 +36,8 @@ class Env:
         (self.s / "spidev").write_text("")
         (self.s / "calls").write_text("")
         (self.s / "UDC").write_text("udc.0\n")
+        (self.s / "modules" / "st_accel_i2c").mkdir(parents=True)  # loaded, as after boot
+        (self.s / "meminfo").write_text("MemFree: 9000 kB\nCmaTotal: 12288 kB\nCmaFree: 8000 kB\n")
         self.env = dict(
             os.environ,
             STUB_STATE=str(self.s),
@@ -65,6 +67,8 @@ class Env:
             I2CGET=str(STUBS / "i2cget"),
             I2CSET=str(STUBS / "i2cset"),
             RMMOD_CMD=str(STUBS / "rmmod"),
+            SYS_MODULE_DIR=str(self.s / "modules"),
+            MEMINFO=str(self.s / "meminfo"),
             MODPROBE_CMD=str(STUBS / "modprobe"),
             I2C_DEV_DIR=str(self.s / "i2cdev"),
             I2C_NODE_DIR=str(self.s / "devnodes"),
@@ -226,6 +230,51 @@ def test_low_battery_powers_off_without_alarm(env):
     assert "magpie-accel wake tap" not in env.calls
     assert not env.called("snap") and not env.called("gpsnap")
     assert env.csv_rows()[0]["end"] == "lowbat"
+
+
+# ---- CMA shortage retry, log hygiene ----
+
+def test_snap_out_of_memory_syncs_and_retries(env):
+    env.put("snap_oom", "1")
+    env.put("dmesg", "[ 9.0] cma: cma_alloc: alloc failed, req-size: 512 pages, ret: -16\n")
+    env.run()
+    assert len(env.called("snap")) == 2
+    row = env.csv_rows()[0]
+    assert row["photo_ok"] == "1" and row["photo_bytes"] == "120000"
+    log = env.daemon_log()
+    assert "snap: no CMA (CmaTotal: 12288 kB CmaFree: 8000 kB" in log
+    assert "ret: -16" in log and "snap retry after sync ok" in log
+
+
+def test_snap_out_of_memory_twice_is_a_failed_photo(env):
+    env.put("snap_oom", "2")
+    env.run()
+    assert len(env.called("snap")) == 2
+    assert env.csv_rows()[0]["photo_ok"] == "0"
+    assert "photo failed (1 in a row)" in env.daemon_log()
+
+
+def test_other_snap_failures_are_not_retried(env):
+    env.put("snap_fail", "")
+    env.run()
+    assert len(env.called("snap")) == 1
+
+
+def test_nul_bytes_are_stripped_at_start(env):
+    d = env.data / "lifelog"
+    d.mkdir()
+    (d / "log.csv").write_bytes(b"date,wake\n2026-10-31 18:37:00,RTC\n" + b"\0" * 88 + b"2026-10-31 18:37:44,none\n")
+    env.run()
+    b = (d / "log.csv").read_bytes()
+    assert b"\0" not in b and b.startswith(b"date,wake\n2026-10-31 18:37:00,RTC\n2026-10-31 18:37:44,none\n")
+    assert len(env.csv_rows()) == 3
+
+
+def test_accel_prep_skips_rmmod_when_not_loaded(env):
+    (env.s / "modules" / "st_accel_i2c").rmdir()
+    r, _ = accel(env, "prep")
+    assert "rmmod st_accel_i2c" not in env.calls
+    assert "rmmod" not in env.daemon_log()
 
 
 # ---- RTT backup wake ----

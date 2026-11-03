@@ -1,6 +1,15 @@
 #!/bin/sh
 echo "snap $*" >> "$STUB_STATE/calls"
 [ -f "$STUB_STATE/snap_fail" ] && { echo "snap: timeout" >&2; exit 3; }
+# snap_oom: number of calls that fail like a CMA shortage (decremented per call)
+if [ -f "$STUB_STATE/snap_oom" ]; then
+	k=$(cat "$STUB_STATE/snap_oom")
+	if [ "$k" -gt 0 ]; then
+		echo $((k - 1)) > "$STUB_STATE/snap_oom"
+		echo "snap: VIDIOC_REQBUFS: Out of memory" >&2
+		exit 1
+	fi
+fi
 [ "$1" = -o ] || exit 1
 n=$(cat "$STUB_STATE/snap_size" 2>/dev/null || echo 120000)
 mkdir -p "$(dirname "$2")"

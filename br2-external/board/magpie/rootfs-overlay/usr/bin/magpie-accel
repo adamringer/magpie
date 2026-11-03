@@ -65,7 +65,10 @@ s16() { # lo-reg hi-reg -> signed 16-bit
 
 case "${1:-}" in
 prep)
-	"$RMMOD_CMD" st_accel_i2c > /dev/null 2>&1 || ll_log "rmmod st_accel_i2c: not loaded or failed"
+	# the IIO driver owns the chip after boot; once removed it stays out, so this only acts on the first cycle
+	if [ -d "$SYS_MODULE_DIR/st_accel_i2c" ]; then
+		"$RMMOD_CMD" st_accel_i2c > /dev/null 2>&1 || ll_log "rmmod st_accel_i2c failed"
+	fi
 	"$MODPROBE_CMD" i2c-dev > /dev/null 2>&1 || ll_log "modprobe i2c-dev failed (built in?)"
 	find_bus || exit 1
 	i=0

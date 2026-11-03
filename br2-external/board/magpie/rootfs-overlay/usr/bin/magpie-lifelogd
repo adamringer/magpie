@@ -284,16 +284,23 @@ disarm_alarm() {
 arm_rtt() { # seconds until the RTC alarm
 	[ "$RTT_BACKUP" -gt 0 ] || return 0
 	_mr=$($DEVMEM "$RTT_MR" 32 2> /dev/null)
+	# The counter runs asynchronously; a read during an update can be garbled. Each devmem is a separate process
+	# (well over one count apart), so instead of two equal reads, accept a read 0..1023 counts after the previous.
 	_v1=$($DEVMEM "$RTT_VR" 32 2> /dev/null)
-	_v2=$($DEVMEM "$RTT_VR" 32 2> /dev/null)
 	_i=0
-	while [ -n "$_v1" ] && [ "$_v1" != "$_v2" ] && [ "$_i" -lt 5 ]; do # asynchronous counter: two reads must agree
-		_v1=$_v2
+	_ok=0
+	while [ "$_i" -lt 4 ]; do
 		_v2=$($DEVMEM "$RTT_VR" 32 2> /dev/null)
+		case "$_v1$_v2" in 0x*0x*)
+			_dv=$(((_v2 - _v1) & 0xFFFFFFFF))
+			[ "$_dv" -lt 1024 ] && { _ok=1; break; }
+			;;
+		esac
+		_v1=$_v2
 		_i=$((_i + 1))
 	done
-	case "$_mr$_v2" in 0x*0x*) ;; *)
-		ll_log "RTT backup alarm not set (read RTT_MR '$_mr', RTT_VR '$_v2')"
+	case "$_ok$_mr" in 10x*) ;; *)
+		ll_log "RTT backup alarm not set (read RTT_MR '$_mr', RTT_VR '$_v1' '$_v2')"
 		return 0
 		;;
 	esac

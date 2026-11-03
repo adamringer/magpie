@@ -167,7 +167,8 @@ rebind_gadget() {
 }
 
 # Wake source after a fast resume, from the kernel line "at91-backup: resumed, SHDW_SR=0x...".
-# Bit 17 = RTC, bit 0 = WKUP0 (USB plug-in or accelerometer): same words as the cold-boot "Wake-Up source:".
+# Bit 17 = RTC, bit 16 = RTT (the backup alarm: the RTC alarm was missed), bit 0 = WKUP0 (USB plug-in or
+# accelerometer): same words as the cold-boot "Wake-Up source:".
 resume_wake_source() {
 	_l=$($DMESG_CMD 2> /dev/null | grep 'at91-backup: resumed, SHDW_SR=' | tail -n 1)
 	_sr=${_l##*SHDW_SR=}
@@ -177,7 +178,13 @@ resume_wake_source() {
 		return 0
 		;;
 	esac
-	if [ $((_sr & 0x20000)) -ne 0 ]; then echo RTC; else echo unknown; fi
+	if [ $((_sr & 0x20000)) -ne 0 ]; then
+		echo RTC
+	elif [ $((_sr & 0x10000)) -ne 0 ]; then
+		echo RTT
+	else
+		echo unknown
+	fi
 }
 
 # 0 = this sleep is a fast-resume sleep, 1 = power off (poweroff mode, resume disabled by failures, or a cold boot is due)
@@ -250,7 +257,10 @@ set_alarm() { # seconds
 			*) _d=-1 ;;
 			esac
 			case "$_d" in '' | *[!0-9]*) ;; *)
-				[ "$_d" -ge 1 ] && [ "$_d" -le $((_n + 3)) ] && return 0
+				if [ "$_d" -ge 1 ] && [ "$_d" -le $((_n + 3)) ]; then
+					arm_rtt "$_n"
+					return 0
+				fi
 				;;
 			esac
 			ll_log "alarm +$_n not accepted (read back '$_a')"
@@ -263,7 +273,39 @@ set_alarm() { # seconds
 	return 1
 }
 
-disarm_alarm() { echo 0 > "$RTC_DIR/wakealarm" 2> /dev/null; }
+disarm_alarm() {
+	echo 0 > "$RTC_DIR/wakealarm" 2> /dev/null
+	[ "$RTT_BACKUP" -gt 0 ] && $DEVMEM "$RTT_AR" 32 0xFFFFFFFF 2> /dev/null
+	return 0
+}
+
+# Backup wake: RTT alarm RTT_BACKUP seconds after the RTC alarm (+$1 s). The RTT keeps counting (the GPS
+# timebase), only its alarm register changes. Failure is logged, never fatal: the RTC alarm is armed.
+arm_rtt() { # seconds until the RTC alarm
+	[ "$RTT_BACKUP" -gt 0 ] || return 0
+	_mr=$($DEVMEM "$RTT_MR" 32 2> /dev/null)
+	_v1=$($DEVMEM "$RTT_VR" 32 2> /dev/null)
+	_v2=$($DEVMEM "$RTT_VR" 32 2> /dev/null)
+	_i=0
+	while [ -n "$_v1" ] && [ "$_v1" != "$_v2" ] && [ "$_i" -lt 5 ]; do # asynchronous counter: two reads must agree
+		_v1=$_v2
+		_v2=$($DEVMEM "$RTT_VR" 32 2> /dev/null)
+		_i=$((_i + 1))
+	done
+	case "$_mr$_v2" in 0x*0x*) ;; *)
+		ll_log "RTT backup alarm not set (read RTT_MR '$_mr', RTT_VR '$_v2')"
+		return 0
+		;;
+	esac
+	_pres=$((_mr & 0xFFFF))
+	[ "$_pres" -eq 0 ] && _pres=65536
+	_ar=$(((_v2 + ($1 + RTT_BACKUP) * 32768 / _pres) & 0xFFFFFFFF))
+	$DEVMEM "$RTT_AR" 32 "$(printf '0x%08X' "$_ar")" 2> /dev/null || ll_log "RTT backup alarm write failed"
+	# the old alarm can't fire any more: clear its flags, or the next wake would report RTT (or be instant)
+	$DEVMEM "$RTT_SR" 32 > /dev/null 2>&1
+	$DEVMEM "$SHDW_SR" 32 > /dev/null 2>&1
+	return 0
+}
 
 do_poweroff() {
 	sync

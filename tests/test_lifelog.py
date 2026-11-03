@@ -228,6 +228,52 @@ def test_low_battery_powers_off_without_alarm(env):
     assert env.csv_rows()[0]["end"] == "lowbat"
 
 
+# ---- RTT backup wake ----
+
+def rtt_alarm_writes(env):
+    return [c.split()[-1] for c in env.calls if c.startswith("devmem write 0xfffffe24 ")]
+
+
+def test_rtt_backup_alarm_follows_rtc_alarm(env):
+    env.put("dmesg", "[ 0.0] foo\n")
+    env.run()
+    assert poweroff_alarm(env) == "+15"
+    # prescaler 32 = 1024 counts/s; (15 + 5) s after count 0x100000; the status is read (cleared) after the write
+    assert rtt_alarm_writes(env) == ["0x00105000"]
+
+
+def test_rtt_backup_alarm_wraps_at_32_bits(env):
+    env.put("rtt_vr", "0xFFFFF000\n")
+    env.put("rtt_mr", "0x00000000\n")  # RTPRES 0 = 65536: 0.5 count/s, 20 s = 10 counts
+    env.run()
+    assert rtt_alarm_writes(env) == ["0xFFFFF00A"]
+    env.put("rtt_vr", "0xFFFFFFFE\n")
+    env.put("calls", "")
+    env.put("rtt_mr", "0x00000020\n")
+    env.run()
+    assert rtt_alarm_writes(env)[-1] == "0x00004FFE"
+
+
+def test_rtt_backup_off(env):
+    env.env["RTT_BACKUP"] = "0"
+    env.run()
+    assert rtt_alarm_writes(env) == []
+
+
+def test_rtt_unreadable_still_powers_off_with_rtc_alarm(env):
+    env.put("rtt_vr", "garbage\n")
+    env.run()
+    assert poweroff_alarm(env) == "+15"
+    assert rtt_alarm_writes(env) == []
+    assert "RTT backup alarm not set" in env.daemon_log()
+
+
+def test_low_battery_disarms_rtt(env):
+    env.put("battery", "200\n")
+    env.run()
+    assert rtt_alarm_writes(env) == ["0xFFFFFFFF"]
+
+
 def test_warning_level_continues(env):
     env.put("battery", "206\n")
     env.run()
@@ -536,6 +582,12 @@ def test_resume_wake_source_from_shdw_sr(env):
     resume_env(env, dmesg="at91-backup: resumed, SHDW_SR=0x00000001\n", loops=4)
     env.run()
     assert [r["wake"] for r in env.csv_rows()] == ["none", "unknown"]
+
+
+def test_resume_wake_source_rtt(env):
+    resume_env(env, dmesg="at91-backup: resumed, SHDW_SR=0x00010000\n", loops=4)
+    env.run()
+    assert [r["wake"] for r in env.csv_rows()] == ["none", "RTT"]
 
 
 def test_every_cold_every_th_sleep_powers_off(env):

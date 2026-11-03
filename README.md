@@ -224,6 +224,7 @@ file is read once at start, so reboot the Clip or run `/etc/init.d/S50lifelog re
 | `GPS` | 1 | 1 = take a GPS snapshot with every photo, 0 = photos only |
 | `SLEEP_MODE` | resume | `resume`: fast sleep between photos. `poweroff`: switch off and cold boot for every photo (slower) |
 | `COLD_EVERY` | 70 | in `resume` mode, every Nth sleep is a full power-off and cold boot; 0 = never |
+| `RTT_BACKUP` | 5 | a second wake alarm this many seconds after each normal one, in case the first is missed; 0 = off |
 | `BLINK` | 1 | 1 = blink an LED for each photo |
 | `BLINK_LEVEL` | 1 | 1 = the blink shows the battery level (LEDs 1 to N); 0 = only LED `BLINK_LED` |
 | `BLINK_LED` | 1 | which LED (1 to 4) blinks when `BLINK_LEVEL=0` |

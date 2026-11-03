@@ -80,6 +80,12 @@
 : "${PIOC_PDSR:=0xfffff83c}"     # PIOC pin data status; bit 31 = PC31 = VBUS, active low
 : "${GPBR1:=0xfffffe64}"
 : "${GPBR2:=0xfffffe68}"
+: "${RTT_BACKUP:=5}"           # RTT alarm this many seconds after every RTC alarm, a backup wake if the RTC one is missed; 0 = off
+: "${RTT_MR:=0xfffffe20}"        # Real-time Timer (backup domain): mode (RTPRES in bits 0-15), alarm, value, status
+: "${RTT_AR:=0xfffffe24}"
+: "${RTT_VR:=0xfffffe28}"
+: "${RTT_SR:=0xfffffe2c}"        # reading clears ALMS, so a stale alarm can't turn the next sleep into an instant wake
+: "${SHDW_SR:=0xfffffe18}"       # reading clears the wake flags; the RTT alarm of the last sleep latches RTTWK while awake
 : "${GPBR3:=0xfffffe6c}"          # kernel fast-resume markers 0x4D5057xx (0 after power-on)
 : "${HEALTHY_MARK:=0x4D500020}"
 : "${UDC_FILE:=/sys/kernel/config/usb_gadget/magpie/UDC}"   # USB gadget binding: empty string = unbound
@@ -164,7 +170,7 @@ ll_load_conf() {
 		DARK_JPEG_BYTES:60000 DARK_AFTER:2 DARK_INTERVAL:120 DARK_LONG_AFTER:10 DARK_LONG_INTERVAL:480 \
 		FACEDOWN_SIGN:-1 FACEDOWN_THRESHOLD:800 FACEDOWN_OTHER_MAX:350 FACEDOWN_INTERVAL:120 \
 		FACEDOWN_LONG_AFTER:10 FACEDOWN_LONG_INTERVAL:240 LOG_MAX:1048576 WAIT_TIMEOUT:15 DATA_WAIT:20 \
-		SNAP_TIMEOUT:30 GPSNAP_TIMEOUT:30 NOALARM_RETRY:30 COLD_EVERY:70 RESUME_MAX_FAIL:3 GPS:1 BLINK:1 BLINK_LED:1 BLINK_LEVEL:1; do
+		SNAP_TIMEOUT:30 GPSNAP_TIMEOUT:30 NOALARM_RETRY:30 COLD_EVERY:70 RESUME_MAX_FAIL:3 RTT_BACKUP:5 GPS:1 BLINK:1 BLINK_LED:1 BLINK_LEVEL:1; do
 		ll_int "${_p%%:*}" "${_p#*:}"
 	done
 	[ "$VBUS_CHECKS" -ge 1 ] || VBUS_CHECKS=1

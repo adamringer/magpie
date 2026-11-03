@@ -345,8 +345,11 @@
  * WKUP0 on a falling edge (the accelerometer's tap interrupt, INT1) and the RTC
  * alarm. Mainline's "low" is WKMODE0 = 2, which the SAM9G25 datasheet defines as
  * FALLING_EDGE, so this is exactly the stock setting.
+ * Plus the RTT alarm (SHDW_MR 0x00030002, not stock): lifelog arms it a few
+ * seconds after every RTC alarm, so a missed RTC wake no longer sleeps forever.
  */
 &shutdown_controller {
 	atmel,wakeup-mode = "low";
 	atmel,wakeup-rtc-timer;
+	atmel,wakeup-rtt-timer;
 };
